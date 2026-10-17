@@ -112,25 +112,34 @@ def make_handler(store: TelemetryStore):
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path in ("/", "/health"):
+                latest = store.latest or {}
                 self._send(
                     200,
                     {
                         "ok": True,
                         "samples": store.count,
-                        "mic_chunks": store.mic_chunks,
-                        "mic_bytes": store.mic_bytes,
-                        "hint": "Open /latest for last sample. UNO Q must POST to /telemetry (browsers GET and used to 404).",
+                        "sensors": {
+                            "temp_c": latest.get("temp_c"),
+                            "humidity_pct": latest.get("humidity_pct"),
+                            "light": latest.get("light"),
+                            "light_raw": latest.get("light_raw"),
+                        },
+                        "hint": "DHT11/light only. Open /latest for full sample. Board POSTs to /telemetry.",
                     },
                 )
                 return
             if path in ("/latest", "/telemetry"):
                 # /telemetry is POST-only for the board; GET shows status so browsers don't 404.
+                latest = store.latest or {}
                 self._send(
                     200,
                     {
                         "ok": True,
                         "method_for_unoq": "POST",
                         "samples": store.count,
+                        "temp_c": latest.get("temp_c"),
+                        "humidity_pct": latest.get("humidity_pct"),
+                        "light": latest.get("light"),
                         "latest": store.latest,
                     },
                 )

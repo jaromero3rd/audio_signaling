@@ -81,11 +81,12 @@ def on_sample(ok: bool, temp_c: float, humidity: float, light_raw: float) -> Non
     now = time.time()
     if now - _last >= 1.0:
         _last = now
-        tag = "SENT" if sent else "WAITING"
+        # Show sensor line every second; SENT only when HTTP post succeeded this tick
+        tag = "SENT" if sent else ("LIVE" if _stream._http_ok else "WAITING")
         print(
             f"[{tag}] {_stream.status_line()} | "
-            f"DHT11 T={payload['temp_c']}C RH={payload['humidity_pct']}% "
-            f"light={lr.level}/100 sent={_stream.sent}",
+            f"T={payload['temp_c']}C RH={payload['humidity_pct']}% "
+            f"light={lr.level}/100 raw={lr.raw} sent={_stream.sent}",
             flush=True,
         )
 

@@ -21,10 +21,10 @@
     "rssi_memory_s": 120.0
   },
   "audio": {
-    "transfer": true,
+    "transfer": false,
     "device": null,
     "mic_url": null,
     "invert_light": false,
-    "note": "UNO Q only captures + transfers mic PCM to ground /mic. Grok Voice / farmer commands run on the laptop (voice_grok.py), not here."
+    "note": "Mic transfer OFF by default — only DHT11/light telemetry to /telemetry."
   }
 }

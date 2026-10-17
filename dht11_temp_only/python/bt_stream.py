@@ -81,25 +81,27 @@ class SensorStream:
         self.device_id = str(cfg.get("device_id") or "unoq-dht11")
         self._http_ok = False
         self._http_error: str | None = None
+        self._last_http_post = 0.0
+        # Sensors only — no microphone. Post ~2 Hz so ground station stays readable.
+        self._http_min_interval_s = float(cfg.get("http_min_interval_s") or 0.5)
 
         self.sent = 0
         self.ips = _local_ips()
 
     def start(self) -> None:
         threading.Thread(target=self._tcp_server, name="tcp-9123", daemon=True).start()
-        threading.Thread(target=self._host_client, name="host-9124", daemon=True).start()
-        time.sleep(0.5)
+        # No BLE host client by default — sensors go over HTTP to sensor_recv
+        time.sleep(0.3)
         self._print_howto()
 
     def _print_howto(self) -> None:
         print("=" * 56, flush=True)
-        print("SENSORS OK — ground laptop must run:", flush=True)
-        print("  python -m ground_station.sensor_recv --host 0.0.0.0 --port 8765", flush=True)
+        print("Sending DHT11 + light ONLY (no mic) to ground computer.", flush=True)
+        print("  Other PC: python -m ground_station.sensor_recv --host 0.0.0.0 --port 8765", flush=True)
         if self.ground_url:
-            print(f"UNO Q will POST to: {self.ground_url}", flush=True)
-            print("Edit python/config.json if that IP is wrong (not 0.0.0.0).", flush=True)
+            print(f"  This board POSTs: {self.ground_url}", flush=True)
         else:
-            print("Set ground_station_url in python/config.json to enable HTTP.", flush=True)
+            print("  ERROR: set ground_station_url in python/config.json", flush=True)
         print("=" * 56, flush=True)
 
     def status_line(self) -> str:
@@ -155,14 +157,13 @@ class SensorStream:
                 time.sleep(2)
 
     def send_sample(self, payload: dict[str, Any]) -> bool:
+        """Send sensor JSON (T/RH/light) — never microphone."""
         payload = dict(payload)
-        payload.setdefault("source", "dht11_temp_only")
+        payload.pop("audio_b64", None)
+        payload.pop("mic", None)
+        payload.setdefault("source", "dht11")
         payload.setdefault("device_id", self.device_id)
-        line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
-        ok = False
-        ok = self._post_http(payload) or ok
-        ok = self._fanout(self._tcp_clients, self._tcp_lock, line) or ok
-        ok = self._send_host(line) or ok
+        ok = self._post_http(payload)
         if ok:
             self.sent += 1
         return ok
@@ -170,6 +171,10 @@ class SensorStream:
     def _post_http(self, payload: dict[str, Any]) -> bool:
         if not self.ground_url:
             return False
+        now = time.time()
+        if now - self._last_http_post < self._http_min_interval_s:
+            return False  # skip this tick; status still shows last HTTP-OK/WAIT
+        self._last_http_post = now
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             self.ground_url,
@@ -182,10 +187,18 @@ class SensorStream:
                 ok = 200 <= getattr(resp, "status", 200) < 300
                 self._http_ok = ok
                 self._http_error = None if ok else f"status={getattr(resp, 'status', '?')}"
+                if ok:
+                    print(
+                        f"[http] posted T={payload.get('temp_c')}C "
+                        f"RH={payload.get('humidity_pct')}% "
+                        f"light={payload.get('light')}/100",
+                        flush=True,
+                    )
                 return ok
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             self._http_ok = False
             self._http_error = str(exc)
+            print(f"[http] POST failed: {exc}", flush=True)
             return False
 
     def _send_host(self, line: bytes) -> bool:
