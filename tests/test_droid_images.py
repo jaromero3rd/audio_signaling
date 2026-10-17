@@ -41,10 +41,15 @@ class ImageStream:
         s.contexts.append(context)
         if s.alert:
             await tools["send_photon_alert"]({})
+        if s.before_decision:
+            s.before_decision()
         if s.decision:
             result = json.loads(await tools["issue_drone_command"](
                 {"drone_id": "drone-1", "action": s.decision}))
-            assert result["executed"] is False
+            if s.decision in ("land", "abort"):
+                assert result["stopped"] is True
+            else:
+                assert result["executed"] is False
         if s.before_final:
             s.before_final()
         self.result = SimpleNamespace(success=s.success, text=s.final, session_id="persistent")
@@ -57,6 +62,7 @@ class ImageSession(DecisionSession):
     decision = "continue_survey"
     early_decision = False
     success = True
+    before_decision = None
     before_final = None
     alert = True
 
@@ -158,6 +164,73 @@ class ImageTurnTests(unittest.IsolatedAsyncioTestCase):
                                    session_factory=self.factory(before_final=self.driver.stop)) as controller:
             await self.run_photo(controller)
             self.assertEqual(self.mission.phase, "abort")
+            self.assertFalse(self.alerts)
+
+    async def check_emergency_alert(self, action):
+        def stopped_before_final():
+            self.assertTrue(self.driver.snapshot()["stopped"])
+            self.assertEqual(self.mission.phase, "abort")
+            self.assertFalse(self.alerts)
+
+        async with DroidController(
+            self.driver, pipeline=self.pipeline,
+            session_factory=self.factory(decision=action, before_final=stopped_before_final),
+        ) as controller:
+            await self.run_photo(controller)
+            self.assertEqual(len(self.alerts), 1)
+            self.assertEqual(self.alerts[0]["health_score"], 0.2)
+            self.assertTrue(self.driver.snapshot()["stopped"])
+
+    async def test_land_keeps_validated_critical_alert_and_stops_immediately(self):
+        await self.check_emergency_alert("land")
+
+    async def test_abort_keeps_validated_critical_alert_and_stops_immediately(self):
+        await self.check_emergency_alert("abort")
+
+    async def test_operator_stop_before_model_land_cancels_alert(self):
+        async with DroidController(
+            self.driver, pipeline=self.pipeline,
+            session_factory=self.factory(decision="land", before_decision=self.driver.stop),
+        ) as controller:
+            await self.run_photo(controller)
+            self.assertFalse(self.alerts)
+
+    async def test_operator_stop_after_model_land_cancels_alert(self):
+        async with DroidController(
+            self.driver, pipeline=self.pipeline,
+            session_factory=self.factory(decision="land", before_final=self.driver.stop),
+        ) as controller:
+            await self.run_photo(controller)
+            self.assertFalse(self.alerts)
+
+    async def test_expired_hold_before_model_land_cancels_alert(self):
+        def expire():
+            self.mission._analysis_deadline = 0
+
+        async with DroidController(
+            self.driver, pipeline=self.pipeline,
+            session_factory=self.factory(decision="land", before_decision=expire),
+        ) as controller:
+            await self.run_photo(controller)
+            self.assertFalse(self.alerts)
+
+    async def test_invalid_final_after_model_land_cancels_alert(self):
+        async with DroidController(
+            self.driver, pipeline=self.pipeline,
+            session_factory=self.factory(decision="land", final="not JSON"),
+        ) as controller:
+            with self.assertRaises(AnalysisError):
+                await self.run_photo(controller)
+            self.assertFalse(self.alerts)
+            self.assertTrue(self.driver.snapshot()["stopped"])
+
+    async def test_failed_turn_after_model_land_cancels_alert(self):
+        async with DroidController(
+            self.driver, pipeline=self.pipeline,
+            session_factory=self.factory(decision="land", success=False),
+        ) as controller:
+            with self.assertRaises(ControllerError):
+                await self.run_photo(controller)
             self.assertFalse(self.alerts)
 
     async def test_chalk_is_evaluated_in_same_turn_before_decision(self):

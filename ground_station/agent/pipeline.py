@@ -129,11 +129,13 @@ class SurveyPipeline:
                        (receipt, self.field_id, time.time(), json.dumps(self.latest), "pending"))
         return True
 
-    def send_alert(self) -> dict:
+    def send_alert(self, *, stop_generation: int | None = None) -> dict:
         state = self.driver.snapshot()
         if self.latest is None or self.latest["capture_id"] != state["capture_id"]:
             return {"ok": False, "reason": "no_current_analysis"}
-        if state["stopped"] or not state["analysis_ready"]:
+        if (state["stopped"] and (stop_generation is None
+                                 or stop_generation != state["stop_generation"])
+                or not state["analysis_ready"]):
             return {"ok": False, "reason": "stopped_or_reimage_pending"}
         if self.photon is None:
             return {"ok": False, "reason": "photon_not_configured"}

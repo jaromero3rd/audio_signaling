@@ -95,6 +95,7 @@ class DroidController:
         self._photo_capture = None
         self._photo_analysis = None
         self._photo_decision = None
+        self._photo_stop_generation = None
         self._photo_alert = False
         self._status_read = False
         self._turn_error = None
@@ -114,7 +115,13 @@ class DroidController:
             self._consume_call()
             if action in ("land", "abort"):
                 self._photo_decision = (drone_id, action)
-                return json.dumps(driver.issue(drone_id, action))
+                result = driver.issue(drone_id, action)
+                if self._photo_analysis is not None and (
+                    result["analysis_capture"] == self._photo_capture
+                    or self._photo_stop_generation == result["stop_generation"] - 1
+                ):
+                    self._photo_stop_generation = result["stop_generation"]
+                return json.dumps(result)
             self._require_status()
             if self._photo_capture is not None:
                 if drone_id != driver.drone_id or action == "start_survey":
@@ -284,6 +291,7 @@ class DroidController:
             self._photo_capture = photo_capture
             self._photo_analysis = None
             self._photo_decision = None
+            self._photo_stop_generation = None
             self._photo_alert = False
             self._status_read = False
             self._turn_error = None
@@ -315,7 +323,12 @@ class DroidController:
                     state = self.driver.snapshot()
                     if photo_capture != state["capture_id"]:
                         raise ControllerError("Stale image-turn decision")
-                    if not state["stopped"]:
+                    if state["stopped"]:
+                        # Only this turn's immediate landing may preserve its alert.
+                        # A later external stop changes the generation and cancels it.
+                        if self._photo_alert and self._photo_stop_generation is not None:
+                            self.pipeline.send_alert(stop_generation=self._photo_stop_generation)
+                    else:
                         if not state["analysis_ready"] or not self.driver.mission.analysis_waiting():
                             raise ControllerError("Image hold expired before decision")
                         if self._photo_alert:
