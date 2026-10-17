@@ -6,7 +6,7 @@ Tracks: SpaceXAI, Factory Droid SDK, Photon 2.0, Daytona, Chalk, ASUS Sustainabi
 
 ## 1. Overview
 
-AgriDrone is a ground-station + drone system that surveys agricultural fields (demo with corn), analyzes photos for crop health, decides next actions, and alerts the operator.
+AgriDrone is a ground-station + drone system that surveys agricultural fields (demo with wheat), analyzes photos for crop health, decides next actions, and alerts the operator.
 
 **Team workflow**
 - All coding is done with **Factory Droid CLI inside Cursor**.
@@ -134,7 +134,7 @@ Droid must do real work in the running product (not just help write code).
 
 ## 7. Success Criteria (demo)
 
-1. Operator sends a voice or Photon command: “survey the corn.”
+1. Operator sends a voice or Photon command: “survey the wheat.”
 2. Drone captures a photo → Grok analyzes it → health score and notes are returned.
 3. Embedded Droid decides the next action and issues a command.
 4. An alert with the photo arrives on the operator’s phone via Photon.
