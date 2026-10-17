@@ -5,6 +5,9 @@ __pycache__/
 captures/
 tags/
 datasets/
+data/
 runs/
+.cache/
+wheat_detection/gwhd.yaml
 *.pt
 yolov8*.pt

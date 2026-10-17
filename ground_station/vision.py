@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WEIGHTS = ROOT / "models" / "wheat_heads.pt"
+DEFAULT_WEIGHTS = ROOT / "models" / "wheat_detection.pt"
 MISSING_WEIGHTS_MSG = (
     f"No wheat-head weights at {DEFAULT_WEIGHTS}. "
     "Convert the Global Wheat Detection set, then train:\n"

@@ -1,0 +1,22 @@
+# audio_signaling
+
+AgriDrone field-survey repo. `send.py` / `recv.py` are the ggwave audio link. Wheat-head detection is under `wheat_detection/`.
+
+## Wheat head detector (YOLOv8)
+
+Fine-tune of YOLOv8s on the [Global Wheat Head Dataset 2021](https://www.kaggle.com/datasets/vbookshelf/global-wheat-head-dataset-2021) (single class: `wheat_head`).
+
+Kaggle's download API needs a token in `~/.kaggle/kaggle.json`. This checkout pulls the same 2021 competition release, already converted to YOLO labels, from [dronefreak/GWHD](https://huggingface.co/datasets/dronefreak/GWHD).
+
+```bash
+pip install -r wheat_detection/requirements.txt
+python wheat_detection/download_dataset.py
+python wheat_detection/prepare_labels.py
+python wheat_detection/train.py
+python wheat_detection/predict.py path/to/field.png
+python wheat_detection/detect.py path/to/field.png --save
+```
+
+Images stay in `data/` (gitignored, about 10 GB). Checkpoints live in `models/`: `wheat_detection.pt` and `wheat_detection.onnx` (1024 px input). `wheat_detection/detect.py` loads the ONNX file and prints every wheat head as `x1 y1 x2 y2 confidence`. `--save` writes an annotated copy under `runs/wheat_detection/onnx/`. Regenerate the ONNX file with `python wheat_detection/export_onnx.py`.
+
+Training defaults: YOLOv8s, 1024 px, batch 8, 50 epochs, COCO pretrained initialization.
