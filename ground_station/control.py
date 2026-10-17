@@ -1,8 +1,9 @@
-"""Shared visual-servoing commands for Tello RC (yaw / forward / up)."""
+"""Shared visual-servoing commands for Tello RC (strafe / yaw / forward / up)."""
 
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import numpy as np
 
@@ -10,6 +11,15 @@ from ground_station.vision import Box
 
 # Ryze Tello front camera (960x720, ~82.6° diagonal).
 TELLO_DIAG_FOV_DEG = 82.6
+
+
+class RcOut(NamedTuple):
+    yaw: int
+    fwd: int
+    up: int
+    lr: int
+    err_x: float | None
+    area: float | None
 
 
 def clip_cmd(value: float, limit: int) -> int:
@@ -47,30 +57,39 @@ def yaw_forward(
     kp_up: float = 0.0,
     max_up: int = 0,
     target_width: float | None = None,
-) -> tuple[int, int, int, float | None, float | None]:
-    """Turn (and optionally climb) first, then approach.
+    kp_lr: float = 110.0,
+    max_lr: int = 30,
+    lr_trim: int = 0,
+    invert_yaw: bool = False,
+    invert_lr: bool = False,
+    forward_gate: float = 0.18,
+) -> RcOut:
+    """Strafe/yaw to center, creep forward once roughly aligned.
 
-    Returns (yaw, forward, up, err_x, area_frac).
-    If target_width is set, closeness is tag width / frame width (distance proxy).
-    Image y grows downward, so a tag above center produces negative err_y and positive up.
+    Tello left_right: negative = left, positive = right.
+    Tag left of center (err_x < 0) → slide left.
     """
     if box is None:
-        return 0, 0, 0, None, None
+        return RcOut(0, 0, 0, 0, None, None)
     fh, fw = frame_shape[:2]
     err_x = (box.cx / fw) - 0.5
     err_y = (box.cy / fh) - 0.5
     area = box.area_frac(frame_shape)
     width = tag_width_frac(box, frame_shape)
     yaw = clip_cmd(kp_yaw * err_x, max_yaw)
+    lr = clip_cmd(kp_lr * err_x + lr_trim, max_lr)
+    if invert_yaw:
+        yaw = -yaw
+    if invert_lr:
+        lr = -lr
     up = clip_cmd(-kp_up * err_y, max_up) if kp_up and max_up else 0
-    centered = abs(err_x) <= deadband and (not kp_up or abs(err_y) <= deadband)
-    if not centered:
-        return yaw, 0, up, err_x, area
+    if abs(err_x) > max(deadband, forward_gate):
+        return RcOut(yaw, 0, up, lr, err_x, area)
     if target_width is not None:
         gap = target_width - width
     else:
         gap = target_area - area
     if gap <= 0:
-        return 0, 0, 0, err_x, area
-    fwd = clip_cmd(kp_fwd * gap, max_fwd)
-    return 0, max(fwd, 0), 0, err_x, area
+        return RcOut(yaw, 0, up, lr, err_x, area)
+    fwd = max(clip_cmd(kp_fwd * gap, max_fwd), 0)
+    return RcOut(yaw, fwd, up, lr, err_x, area)

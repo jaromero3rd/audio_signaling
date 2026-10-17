@@ -150,9 +150,9 @@ def main() -> int:
 
             heads: list[Box] = detector.detect_all(frame) if frame is not None else []
             box = union_boxes(heads)
-            yaw, fwd, _up, err_x, area = (0, 0, 0, None, None)
+            yaw, fwd, lr, err_x, area = 0, 0, 0, None, None
             if frame is not None:
-                yaw, fwd, _up, err_x, area = yaw_forward(
+                rc = yaw_forward(
                     box,
                     frame.shape,
                     kp_yaw=args.kp_yaw,
@@ -162,13 +162,14 @@ def main() -> int:
                     deadband=args.deadband,
                     target_area=args.target_area,
                 )
+                yaw, fwd, _up, lr, err_x, area = rc
 
             if flying:
                 if stale or not guidance:
                     drone.hover()
-                    yaw, fwd = 0, 0
+                    yaw, fwd, lr = 0, 0, 0
                 else:
-                    drone.send_rc(0, fwd, 0, yaw)
+                    drone.send_rc(lr, fwd, 0, yaw)
 
             if t0 - bat_ts > 5:
                 bat = drone.battery()
