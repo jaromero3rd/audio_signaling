@@ -204,7 +204,7 @@ Simply calling the Python helper does **not** deploy resolvers or configure stor
 
 ### Smoke Tests
 
-[chalk_eval.py](ground_station/chalk_eval.py): Submits five labeled health-score cases and prints expected vs. returned flags/actions.
+[chalk_eval.py](ground_station/chalk_eval.py): Runs eight labeled boundary cases and checks the returned flags, severity values, and actions. It exits nonzero on any mismatch, resolver error, or failed query.
 
 [chalk_quality.py](ground_station/chalk_quality.py): Named-query smoke call explicitly targeting the `schedtest` branch.
 

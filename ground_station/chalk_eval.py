@@ -87,7 +87,7 @@ def _check_response(case: EvalCase, response: Any) -> EvalResult:
     if actual["health_flag"] != case.health_flag:
         errors.append(f"health_flag expected {case.health_flag!r}, got {actual['health_flag']!r}")
     severity = actual["severity"]
-    if not isinstance(severity, (int, float)) or not math.isclose(
+    if isinstance(severity, bool) or not isinstance(severity, (int, float)) or not math.isclose(
         severity, case.severity, rel_tol=0.0, abs_tol=1e-9
     ):
         errors.append(f"severity expected {case.severity!r}, got {severity!r}")

@@ -76,6 +76,16 @@ class ChalkEvalTests(unittest.TestCase):
         self.assertEqual(client.calls[0]["branch"], "dev")
         self.assertNotIn("output", client.calls[0])
 
+    def test_boolean_severity_is_rejected_as_a_schema_regression(self):
+        case = CASES[0]
+        response = response_for(case)
+        response.values[f"{FS}.severity"] = True
+
+        result = run_eval(FakeClient([response]), [case])[0]
+
+        self.assertFalse(result.passed)
+        self.assertIn("severity expected 1.0, got True", result.errors)
+
 
 if __name__ == "__main__":
     unittest.main()
