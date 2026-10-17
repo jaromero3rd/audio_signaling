@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ipaddress
 import json
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +28,8 @@ from urllib.parse import urlparse
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOG = ROOT / "data" / "unoq_telemetry.jsonl"
 DEFAULT_MIC = ROOT / "data" / "unoq_mic.f32le"
+APPLE_HOTSPOT_NET = ipaddress.ip_network("172.20.10.0/28")
+BOARD_TCP_PORT = 9123
 
 
 class TelemetryStore:
@@ -194,12 +198,90 @@ def make_handler(store: TelemetryStore):
     return Handler
 
 
+def _print_sample(store: TelemetryStore, payload: dict[str, Any]) -> None:
+    src = payload.get("source", "?")
+    if "temp_c" in payload:
+        print(
+            f"#{store.count} {src} DHT11 "
+            f"T={payload.get('temp_c')}C/{payload.get('temp_f')}F "
+            f"RH={payload.get('humidity_pct')}% "
+            f"HI={payload.get('heat_index_c')}C "
+            f"L={payload.get('light')} dev={payload.get('device_id')}",
+            flush=True,
+        )
+    else:
+        print(f"#{store.count} {src} keys={list(payload.keys())}", flush=True)
+
+
+def _pull_tcp(store: TelemetryStore, host: str, port: int) -> None:
+    print(f"pulling sensors from {host}:{port} (board → Mac POST is blocked on many hotspots)", flush=True)
+    with socket.create_connection((host, port), timeout=0.4) as sock:
+        sock.settimeout(2.0)
+        buf = ""
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except (TimeoutError, socket.timeout):
+                continue
+            if not chunk:
+                return
+            buf += chunk.decode("utf-8", errors="replace")
+            while "\n" in buf:
+                line, _, buf = buf.partition("\n")
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(payload, dict):
+                    store.ingest(payload)
+                    _print_sample(store, payload)
+
+
+def _scan_board_hosts() -> list[str]:
+    hosts = [str(h) for h in APPLE_HOTSPOT_NET.hosts()]
+    try:
+        from drone_interface.field_links import tether_ipv4
+
+        mine = tether_ipv4()
+        if mine in hosts:
+            hosts.remove(mine)
+    except Exception:
+        pass
+    return hosts
+
+
+def auto_pull_loop(store: TelemetryStore, stop: threading.Event) -> None:
+    """Mac connects to App Lab TCP :9123 when inbound HTTP is firewalled/isolated."""
+    while not stop.is_set():
+        for host in _scan_board_hosts():
+            if stop.is_set():
+                return
+            try:
+                _pull_tcp(store, host, BOARD_TCP_PORT)
+            except OSError:
+                continue
+        stop.wait(4.0)
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Receive UNO Q telemetry + mic stream")
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--log", type=Path, default=DEFAULT_LOG)
     p.add_argument("--mic-file", type=Path, default=DEFAULT_MIC)
+    p.add_argument(
+        "--no-pull",
+        action="store_true",
+        help="do not scan 172.20.10.x:9123 (HTTP POST only)",
+    )
+    p.add_argument(
+        "--tcp",
+        default=None,
+        help="pull JSON lines from this board, e.g. 172.20.10.5:9123",
+    )
     args = p.parse_args(argv)
 
     store = TelemetryStore(args.log, args.mic_file)
@@ -213,31 +295,50 @@ def main(argv: list[str] | None = None) -> int:
             post_url = tether
     except Exception:
         pass
-    print("Mac is LISTENING — samples appear only after the board POSTs.")
-    print(f"Put this on the board as ground_station_url:\n  {post_url}")
-    print(f"Mic POST:       {post_url.rsplit('/', 1)[0]}/mic  -> {args.mic_file}")
-    print(f"Browser check:  http://127.0.0.1:{args.port}/latest")
-    print("ElevenAgents (farmer commands) is separate: ground_station/voice_eleven.py")
+    print("Listening for HTTP POSTs (often blocked on iPhone USB/Wi-Fi hotspot).")
+    print(f"  HTTP URL: {post_url}")
+    print("Also scanning the hotspot LAN for App Lab TCP :9123 (Mac pulls the board).")
+    print("If macOS asks to allow incoming Python, click Allow.")
+    print(f"Browser: http://127.0.0.1:{args.port}/latest")
     print("Ctrl-C to stop.")
 
+    stop = threading.Event()
+
     def _heartbeat() -> None:
-        while True:
-            time.sleep(8.0)
+        while not stop.is_set():
+            stop.wait(8.0)
             n = store.count
             if n == 0:
                 print(
-                    f"still waiting (0 samples). Board must be on the phone hotspot and "
-                    f"POSTing {post_url}",
+                    f"still 0 samples — POST {post_url} timed out is expected; waiting for TCP :{BOARD_TCP_PORT}",
                     flush=True,
                 )
             else:
                 print(f"ok: {n} samples received", flush=True)
 
     threading.Thread(target=_heartbeat, name="sensor-wait", daemon=True).start()
+    if args.tcp:
+        host, _, port_s = args.tcp.rpartition(":")
+        port = int(port_s) if port_s.isdigit() else BOARD_TCP_PORT
+        if not host:
+            host, port = args.tcp, BOARD_TCP_PORT
+
+        def _one_pull() -> None:
+            while not stop.is_set():
+                try:
+                    _pull_tcp(store, host, port)
+                except OSError as exc:
+                    print(f"tcp pull {host}:{port} failed: {exc}", flush=True)
+                stop.wait(3.0)
+
+        threading.Thread(target=_one_pull, name="tcp-pull", daemon=True).start()
+    elif not args.no_pull:
+        threading.Thread(target=auto_pull_loop, args=(store, stop), name="tcp-scan", daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nbye")
+        stop.set()
         return 0
     return 0
 

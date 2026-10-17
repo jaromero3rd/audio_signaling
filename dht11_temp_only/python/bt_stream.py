@@ -108,8 +108,10 @@ class SensorStream:
         self._http_ok = False
         self._http_error: str | None = None
         self._last_http_post = 0.0
+        self._last_http_err_print = 0.0
         # Sensors only — no microphone. Post ~2 Hz so ground station stays readable.
         self._http_min_interval_s = float(cfg.get("http_min_interval_s") or 0.5)
+        self._http_timeout_s = float(cfg.get("http_timeout_s") or 1.0)
 
         self.sent = 0
         self.ips = _local_ips()
@@ -122,12 +124,13 @@ class SensorStream:
 
     def _print_howto(self) -> None:
         print("=" * 56, flush=True)
-        print("Sending DHT11 + light ONLY (no mic) to ground computer.", flush=True)
-        print("  Other PC: python -m ground_station.sensor_recv --host 0.0.0.0 --port 8765", flush=True)
+        print("DHT11 + light. HTTP POST often times out on phone-hotspot isolation;", flush=True)
+        print("the Mac should pull TCP :9123 (sensor_recv does this automatically).", flush=True)
+        print(f"  Board IPs: {', '.join(self.ips) or 'unknown'}  TCP:{TCP_PORT}", flush=True)
         if self.ground_url:
-            print(f"  This board POSTs: {self.ground_url}", flush=True)
+            print(f"  HTTP POST (best-effort): {self.ground_url}", flush=True)
         else:
-            print("  ERROR: set ground_station_url in python/config.json", flush=True)
+            print("  HTTP off — Mac must connect to TCP :9123", flush=True)
         print("=" * 56, flush=True)
 
     def status_line(self) -> str:
@@ -189,10 +192,13 @@ class SensorStream:
         payload.pop("mic", None)
         payload.setdefault("source", "dht11")
         payload.setdefault("device_id", self.device_id)
-        ok = self._post_http(payload)
-        if ok:
+        line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+        tcp_ok = self._fanout(self._tcp_clients, self._tcp_lock, line)
+        http_ok = self._post_http(payload)
+        if tcp_ok or http_ok:
             self.sent += 1
-        return ok
+            return True
+        return False
 
     def _post_http(self, payload: dict[str, Any]) -> bool:
         if not self.ground_url:
@@ -209,7 +215,7 @@ class SensorStream:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=2.0) as resp:
+            with urllib.request.urlopen(req, timeout=self._http_timeout_s) as resp:
                 ok = 200 <= getattr(resp, "status", 200) < 300
                 self._http_ok = ok
                 self._http_error = None if ok else f"status={getattr(resp, 'status', '?')}"
@@ -224,7 +230,14 @@ class SensorStream:
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             self._http_ok = False
             self._http_error = str(exc)
-            print(f"[http] POST failed: {exc}", flush=True)
+            now = time.time()
+            if now - self._last_http_err_print >= 8.0:
+                self._last_http_err_print = now
+                print(
+                    f"[http] POST failed ({exc}) url={self.ground_url} — "
+                    f"normal on iPhone hotspot. Mac should pull TCP {self.ips or ['board']}:{TCP_PORT}",
+                    flush=True,
+                )
             return False
 
     def _send_host(self, line: bytes) -> bool:
