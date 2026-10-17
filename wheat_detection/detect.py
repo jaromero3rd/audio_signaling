@@ -2,8 +2,8 @@
 """Detect every wheat head in an image with the ONNX YOLOv8s model.
 
 Examples:
-  python wheat/detect.py field.png
-  python wheat/detect.py images/ --save
+  python wheat_detection/detect.py field.png
+  python wheat_detection/detect.py images/ --save
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import numpy as np
 import onnxruntime as ort
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL = Path(__file__).resolve().parent / "weights" / "yolov8s-wheat.onnx"
+DEFAULT_MODEL = REPO_ROOT / "models" / "wheat_detection.onnx"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 IMGSZ = 1024
 
@@ -192,12 +192,12 @@ def main() -> None:
     parser.add_argument(
         "--save",
         action="store_true",
-        help="write annotated images under runs/wheat/onnx",
+        help="write annotated images under runs/wheat_detection/onnx",
     )
     args = parser.parse_args()
 
     detector = WheatHeadDetector(args.model, conf=args.conf, iou=args.iou)
-    out_dir = REPO_ROOT / "runs" / "wheat" / "onnx"
+    out_dir = REPO_ROOT / "runs" / "wheat_detection" / "onnx"
     if args.save:
         out_dir.mkdir(parents=True, exist_ok=True)
 

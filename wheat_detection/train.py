@@ -12,13 +12,13 @@ from ultralytics import YOLO
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = REPO_ROOT / "data" / "gwhd" / "data"
 YAML_PATH = Path(__file__).resolve().parent / "gwhd.yaml"
-WEIGHTS_OUT = Path(__file__).resolve().parent / "weights" / "yolov8s-wheat.pt"
+WEIGHTS_OUT = REPO_ROOT / "models" / "wheat_detection.pt"
 
 
 def write_data_yaml() -> Path:
     if not (DATA_ROOT / "images" / "train").is_dir():
         raise FileNotFoundError(
-            f"dataset not found at {DATA_ROOT}. Run wheat/download_dataset.py first."
+            f"dataset not found at {DATA_ROOT}. Run wheat_detection/download_dataset.py first."
         )
     YAML_PATH.write_text(
         "\n".join(
@@ -45,7 +45,7 @@ def main() -> None:
     parser.add_argument("--device", default="0")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--project", type=Path, default=REPO_ROOT / "runs" / "wheat")
+    parser.add_argument("--project", type=Path, default=REPO_ROOT / "runs" / "wheat_detection")
     parser.add_argument("--name", default="yolov8s")
     args = parser.parse_args()
 
