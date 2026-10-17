@@ -119,18 +119,28 @@ def make_handler(store: TelemetryStore):
                         "samples": store.count,
                         "mic_chunks": store.mic_chunks,
                         "mic_bytes": store.mic_bytes,
+                        "hint": "Open /latest for last sample. UNO Q must POST to /telemetry (browsers GET and used to 404).",
                     },
                 )
                 return
-            if path == "/latest":
-                self._send(200, {"latest": store.latest, "samples": store.count})
+            if path in ("/latest", "/telemetry"):
+                # /telemetry is POST-only for the board; GET shows status so browsers don't 404.
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "method_for_unoq": "POST",
+                        "samples": store.count,
+                        "latest": store.latest,
+                    },
+                )
                 return
             if path == "/returns":
                 with store._lock:
                     events = list(store.return_events)
                 self._send(200, {"returns": events})
                 return
-            self._send(404, {"error": "not found"})
+            self._send(404, {"error": "not found", "try": ["/", "/health", "/latest", "/telemetry"]})
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
@@ -183,9 +193,11 @@ def main(argv: list[str] | None = None) -> int:
 
     store = TelemetryStore(args.log, args.mic_file)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(store))
-    print(f"telemetry  http://{args.host}:{args.port}/telemetry")
-    print(f"mic stream http://{args.host}:{args.port}/mic  -> {args.mic_file}")
-    print("Grok Voice (farmer commands) is separate: ground_station/voice_grok.py")
+    print(f"Listening on http://{args.host}:{args.port}")
+    print(f"  Browser check:  http://127.0.0.1:{args.port}/latest")
+    print(f"  UNO Q POSTs to: http://<THIS-PC-WIFI-IP>:{args.port}/telemetry")
+    print(f"  Mic POST:       http://<THIS-PC-WIFI-IP>:{args.port}/mic  -> {args.mic_file}")
+    print("Watch this terminal for live T=/RH= lines when the board connects.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
