@@ -1,1 +1,2 @@
 bless>=0.2.6
+# bleak is installed on the ground-station laptop, not required on the UNO Q

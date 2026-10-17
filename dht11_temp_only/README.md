@@ -1,37 +1,45 @@
-# DHT11 + LDR → Bluetooth → ground-station laptop
+# UNO Q sensors → Bluetooth → other computer
 
-UNO Q only reads sensors and sends them. No crop analysis on the board.
-
-## DHT11
-| Pin | UNO Q |
-|-----|--------|
-| S | D2 |
-| U | 5V |
-| G | GND |
-
-## Photoresistor wiring
+The Arduino only **reads** DHT11 + photoresistor and **sends JSON over Bluetooth**.
+Processing happens on the ground-station laptop.
 
 ```
-5V ---- LDR ----+---- A0
-                |
-             [100kΩ]
-                |
-               GND
+[UNO Q]  --Bluetooth-->  [ground-station laptop]
+   DHT11 + LDR                bt_sensor_recv.py
 ```
 
-Brighter light → higher `light_raw`. Software maps to **`light` 1–100**:
-- **1** = dark  
-- **50** = room when the app starts  
-- **100** = super bright  
+## 1) On the UNO Q (App Lab)
+1. Import `dht11_temp_only_import.zip`
+2. Press **Run**
+3. Monitor should say it is advertising as **AgriDrone-UNOQ**
 
-If a flashlight makes `light` go *down*, set `INVERT = True` in `python/light_cal.py`.
+## 2) On the other computer (ground station)
+Copy/clone this repo, then:
 
-Stream rate: light ~**20 Hz**; DHT11 refreshes about once per second.
-
-## Run
-1. App Lab: import/run this app on the UNO Q (`AgriDrone-UNOQ`)
-2. Ground-station laptop:
+### Option A — Bluetooth LE (easiest)
 ```bash
 pip install bleak
 python -m ground_station.bt_sensor_recv
 ```
+
+You should see:
+```
+T=24.0C  RH=45%  light=50/100 (room)  raw=612  ok=True
+```
+
+### Option B — Classic Bluetooth Serial
+1. Pair the UNO Q / AgriDrone-UNOQ in Windows Bluetooth settings  
+2. Note the COM port (e.g. COM5)  
+3. Run:
+```bash
+pip install pyserial
+python -m ground_station.bt_sensor_recv --com COM5
+```
+
+## Wiring
+| Sensor | Pins |
+|--------|------|
+| DHT11 | S→D2, U→5V, G→GND |
+| LDR | 5V—LDR—A0—100k—GND |
+
+`light` is 1–100 (50 ≈ room at startup). `INVERT` is in `python/light_cal.py`.
