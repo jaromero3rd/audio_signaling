@@ -1,0 +1,11 @@
+profiles:
+  default:
+    fqbn: arduino:zephyr:unoq
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - name: Arduino_RouterBridge
+      - name: DHT sensor library
+      - name: Adafruit Unified Sensor
+      - name: SD
+default_profile: default
