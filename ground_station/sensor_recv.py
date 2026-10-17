@@ -112,25 +112,44 @@ def make_handler(store: TelemetryStore):
         def do_GET(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
             if path in ("/", "/health"):
+                latest = store.latest or {}
                 self._send(
                     200,
                     {
                         "ok": True,
                         "samples": store.count,
-                        "mic_chunks": store.mic_chunks,
-                        "mic_bytes": store.mic_bytes,
+                        "sensors": {
+                            "temp_c": latest.get("temp_c"),
+                            "humidity_pct": latest.get("humidity_pct"),
+                            "light": latest.get("light"),
+                            "light_raw": latest.get("light_raw"),
+                        },
+                        "hint": "DHT11/light only. Open /latest for full sample. Board POSTs to /telemetry.",
                     },
                 )
                 return
-            if path == "/latest":
-                self._send(200, {"latest": store.latest, "samples": store.count})
+            if path in ("/latest", "/telemetry"):
+                # /telemetry is POST-only for the board; GET shows status so browsers don't 404.
+                latest = store.latest or {}
+                self._send(
+                    200,
+                    {
+                        "ok": True,
+                        "method_for_unoq": "POST",
+                        "samples": store.count,
+                        "temp_c": latest.get("temp_c"),
+                        "humidity_pct": latest.get("humidity_pct"),
+                        "light": latest.get("light"),
+                        "latest": store.latest,
+                    },
+                )
                 return
             if path == "/returns":
                 with store._lock:
                     events = list(store.return_events)
                 self._send(200, {"returns": events})
                 return
-            self._send(404, {"error": "not found"})
+            self._send(404, {"error": "not found", "try": ["/", "/health", "/latest", "/telemetry"]})
 
         def do_POST(self) -> None:  # noqa: N802
             path = urlparse(self.path).path
@@ -194,6 +213,11 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         pass
     print("Grok Voice (farmer commands) is separate: ground_station/voice_grok.py")
+    print(f"Listening on http://{args.host}:{args.port}")
+    print(f"  Browser check:  http://127.0.0.1:{args.port}/latest")
+    print(f"  UNO Q POSTs to: http://<THIS-PC-WIFI-IP>:{args.port}/telemetry")
+    print(f"  Mic POST:       http://<THIS-PC-WIFI-IP>:{args.port}/mic  -> {args.mic_file}")
+    print("Watch this terminal for live T=/RH= lines when the board connects.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

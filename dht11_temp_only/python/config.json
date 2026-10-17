@@ -1,0 +1,6 @@
+{
+  "ground_station_url": "http://10.253.18.105:8765/telemetry",
+  "device_id": "unoq-dht11",
+  "http_min_interval_s": 0.5,
+  "note": "Sensors only (T/RH/light). No microphone. Ground PC runs sensor_recv."
+}

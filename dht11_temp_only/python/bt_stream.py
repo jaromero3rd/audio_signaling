@@ -15,6 +15,9 @@ import json
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
+from pathlib import Path
 from typing import Any
 
 DEVICE_NAME = "AgriDrone-UNOQ"
@@ -26,6 +29,15 @@ HOST_RELAY_CANDIDATES = (
     "172.18.0.1",
     "172.10.0.1",   # mentioned on Arduino forums
 )
+_CONFIG_PATH = Path(__file__).with_name("config.json")
+
+
+def load_config() -> dict[str, Any]:
+    try:
+        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[cfg] could not read config.json: {exc}", flush=True)
+        return {}
 
 
 def _local_ips() -> list[str]:
@@ -52,7 +64,7 @@ def _local_ips() -> list[str]:
 
 
 class SensorStream:
-    """TCP to laptop + optional forward to host BLE relay."""
+    """TCP + HTTP POST to ground_station.sensor_recv + optional host BLE relay."""
 
     def __init__(self) -> None:
         self._tcp_clients: list[socket.socket] = []
@@ -64,39 +76,43 @@ class SensorStream:
         self._host_addr: str | None = None
         self._host_lock = threading.Lock()
 
+        cfg = load_config()
+        self.ground_url = str(cfg.get("ground_station_url") or "").strip()
+        self.device_id = str(cfg.get("device_id") or "unoq-dht11")
+        self._http_ok = False
+        self._http_error: str | None = None
+        self._last_http_post = 0.0
+        # Sensors only — no microphone. Post ~2 Hz so ground station stays readable.
+        self._http_min_interval_s = float(cfg.get("http_min_interval_s") or 0.5)
+
         self.sent = 0
         self.ips = _local_ips()
 
     def start(self) -> None:
         threading.Thread(target=self._tcp_server, name="tcp-9123", daemon=True).start()
-        threading.Thread(target=self._host_client, name="host-9124", daemon=True).start()
-        time.sleep(0.5)
+        # No BLE host client by default — sensors go over HTTP to sensor_recv
+        time.sleep(0.3)
         self._print_howto()
 
     def _print_howto(self) -> None:
-        ip_hint = self.ips[0] if self.ips else "<UNOQ-IP>"
         print("=" * 56, flush=True)
-        print("SENSORS OK — how to get data on your laptop:", flush=True)
-        print(f"  A) TCP (works now, no Bluetooth):", flush=True)
-        print(f"       python -m ground_station.bt_sensor_recv --tcp {ip_hint}:9123", flush=True)
-        if self.ips:
-            print(f"     board IPs: {', '.join(self.ips)}", flush=True)
-        print(f"  B) Real Bluetooth:", flush=True)
-        print(f"       1. On UNO Q host (adb shell): python3 host_bt_relay.py", flush=True)
-        print(f"       2. On laptop: python -m ground_station.bt_sensor_recv", flush=True)
-        print(f"          (device name: {DEVICE_NAME})", flush=True)
+        print("Sending DHT11 + light ONLY (no mic) to ground computer.", flush=True)
+        print("  Other PC: python -m ground_station.sensor_recv --host 0.0.0.0 --port 8765", flush=True)
+        if self.ground_url:
+            print(f"  This board POSTs: {self.ground_url}", flush=True)
+        else:
+            print("  ERROR: set ground_station_url in python/config.json", flush=True)
         print("=" * 56, flush=True)
 
     def status_line(self) -> str:
+        if self.ground_url:
+            http = "HTTP-OK" if self._http_ok else f"HTTP-WAIT({self._http_error or self.ground_url})"
+        else:
+            http = "HTTP-off"
         with self._tcp_lock:
             n = len(self._tcp_clients)
         tcp = f"TCP:{TCP_PORT} clients={n}" if self._tcp_ok else f"TCP-DOWN({self._tcp_error})"
-        with self._host_lock:
-            if self._host_addr:
-                ble = f"BLE-via-host({self._host_addr})"
-            else:
-                ble = "BLE-off (start host_bt_relay.py on board)"
-        return f"{tcp} | {ble}"
+        return f"{http} | {tcp}"
 
     def _tcp_server(self) -> None:
         try:
@@ -141,13 +157,49 @@ class SensorStream:
                 time.sleep(2)
 
     def send_sample(self, payload: dict[str, Any]) -> bool:
-        line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
-        ok = False
-        ok = self._fanout(self._tcp_clients, self._tcp_lock, line) or ok
-        ok = self._send_host(line) or ok
+        """Send sensor JSON (T/RH/light) — never microphone."""
+        payload = dict(payload)
+        payload.pop("audio_b64", None)
+        payload.pop("mic", None)
+        payload.setdefault("source", "dht11")
+        payload.setdefault("device_id", self.device_id)
+        ok = self._post_http(payload)
         if ok:
             self.sent += 1
         return ok
+
+    def _post_http(self, payload: dict[str, Any]) -> bool:
+        if not self.ground_url:
+            return False
+        now = time.time()
+        if now - self._last_http_post < self._http_min_interval_s:
+            return False  # skip this tick; status still shows last HTTP-OK/WAIT
+        self._last_http_post = now
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self.ground_url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                ok = 200 <= getattr(resp, "status", 200) < 300
+                self._http_ok = ok
+                self._http_error = None if ok else f"status={getattr(resp, 'status', '?')}"
+                if ok:
+                    print(
+                        f"[http] posted T={payload.get('temp_c')}C "
+                        f"RH={payload.get('humidity_pct')}% "
+                        f"light={payload.get('light')}/100",
+                        flush=True,
+                    )
+                return ok
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            self._http_ok = False
+            self._http_error = str(exc)
+            print(f"[http] POST failed: {exc}", flush=True)
+            return False
 
     def _send_host(self, line: bytes) -> bool:
         with self._host_lock:
