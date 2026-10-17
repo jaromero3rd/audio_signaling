@@ -13,9 +13,8 @@ from ground_station.control import tag_width_frac, width_frac_for_distance, yaw_
 from ground_station.vision import DEFAULT_WEIGHTS, Box, union_boxes, wheat_size_ratio
 
 SEARCH_YAW = 22
-SEARCH_TIMEOUT_S = 90.0
-SEARCH_HOME_TIMEOUT_S = 90.0
-SCOUT_FWD = 14
+SEARCH_TIMEOUT_S = 60.0
+SEARCH_HOME_TIMEOUT_S = 60.0
 TARGET_LOST_FRAMES = 12
 APPROACH_TIMEOUT_S = 60.0
 MIN_APPROACH_S = 1.2
@@ -25,8 +24,11 @@ TURN_HOME_S = 3.5
 TURN_HOME_MAX_S = 6.0
 TURN_YAW = 55
 TARGET_GONE_WIDTH = 0.08
-SCOUT_YAW = 30
-SCOUT_HALF_S = 2.0
+# One full yaw at SCAN_YAW ≈ 360° (~50 deg/s at 50). Then climb and spin again.
+SCAN_YAW = 50
+SCAN_360_S = 8.0
+SCAN_CLIMB_S = 1.2
+SCAN_UP = 22
 HOME_LOST_FRAMES = 12
 CLOSE_FEET_DEFAULT = 2.0
 TAG_SIZE_M_DEFAULT = 0.20
@@ -126,6 +128,7 @@ class SurveyMission:
         self._target_miss = 0
         self._last_target_box: Box | None = None
         self._dbg_t = 0.0
+        self._scan_n = -1
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -171,6 +174,7 @@ class SurveyMission:
         self.phase = phase
         self._phase_t = time.time()
         self._dwell_t = None
+        self._scan_n = -1
         print(f"mission {prev} → {phase}")
         if self.on_phase:
             self.on_phase(prev, phase)
@@ -225,7 +229,7 @@ class SurveyMission:
                 if target_box is not None:
                     self._set_phase_locked("approach_target")
                 elif elapsed > SEARCH_TIMEOUT_S:
-                    print("target not found after scout — turning for home")
+                    print("target not found after 60s scan — turning for home")
                     self._set_phase_locked("turn_home")
 
             elif phase == "approach_target":
@@ -274,7 +278,7 @@ class SurveyMission:
                 if home_box is not None:
                     self._set_phase_locked("approach_home")
                 elif elapsed > SEARCH_HOME_TIMEOUT_S:
-                    print("home tag not found after scout — landing in place")
+                    print("home tag not found after 60s scan — landing in place")
                     self._set_phase_locked("land")
 
             elif phase == "approach_home":
@@ -357,9 +361,8 @@ class SurveyMission:
                 )
                 yaw, fwd, up, lr, err_x, area = rc
             elif seeking and box is None and self.flying:
-                roam = phase == "search_target"
                 if phase in ("search_target", "search_home"):
-                    yaw, up, fwd = self._scout(elapsed, g.invert_yaw, roam=roam)
+                    yaw, up, fwd = self._scout(elapsed, g.invert_yaw)
                 else:
                     yaw = SEARCH_YAW
 
@@ -417,31 +420,15 @@ class SurveyMission:
             return False
         return now - self._dwell_t >= DWELL_S
 
-    def _scout(
-        self, elapsed: float, invert_yaw: bool, roam: bool
-    ) -> tuple[int, int, int]:
-        """Sweep yaw both ways, bob altitude, and (if roam) creep forward to hunt."""
-        cycle = int(elapsed / SCOUT_HALF_S)
-        sign = 1 if cycle % 2 == 0 else -1
-        if invert_yaw:
-            sign = -sign
-        yaw = SCOUT_YAW * sign
-        mod = cycle % 8
-        up = 0
-        fwd = 0
-        if roam:
-            if mod in (1, 5):
-                fwd = SCOUT_FWD
-            elif mod == 3:
-                up = 14
-            elif mod == 7:
-                up = -10
-                fwd = 10
-        else:
-            if mod == 2:
-                up = 14
-            elif mod == 5:
-                up = -12
-            elif mod == 6:
-                fwd = 8
-        return yaw, up, fwd
+    def _scout(self, elapsed: float, invert_yaw: bool) -> tuple[int, int, int]:
+        """Yaw a full 360 in place; if still unseen, climb and spin again (max 60s)."""
+        cycle = SCAN_360_S + SCAN_CLIMB_S
+        t = elapsed % cycle
+        n = int(elapsed / cycle)
+        sign = -1 if invert_yaw else 1
+        if t < SCAN_360_S:
+            return SCAN_YAW * sign, 0, 0
+        if n != self._scan_n:
+            self._scan_n = n
+            print(f"scan {n + 1} complete — climbing, then spinning again")
+        return 0, SCAN_UP, 0
