@@ -14,23 +14,36 @@ from ground_station.vision import DEFAULT_WEIGHTS, Box, union_boxes
 
 SEARCH_YAW = 22
 SEARCH_TIMEOUT_S = 40.0
+SEARCH_HOME_TIMEOUT_S = 90.0
 APPROACH_TIMEOUT_S = 60.0
-MIN_APPROACH_S = 2.5
-DWELL_S = 1.5
+MIN_APPROACH_S = 1.2
+DWELL_S = 0.6
 FRAME_STALE_S = 0.5
+TURN_HOME_S = 3.5
+TURN_HOME_MAX_S = 6.0
+TURN_YAW = 55
+TARGET_GONE_WIDTH = 0.08
+SCOUT_YAW = 30
+SCOUT_HALF_S = 2.0
 CLOSE_FEET_DEFAULT = 2.0
 TAG_SIZE_M_DEFAULT = 0.20
 
 
 @dataclass
 class Gains:
-    kp_yaw: float = 160.0
+    kp_yaw: float = 90.0
     kp_fwd: float = 80.0
     kp_up: float = 120.0
-    max_yaw: int = 40
+    kp_lr: float = 110.0
+    max_yaw: int = 35
     max_fwd: int = 20
     max_up: int = 20
+    max_lr: int = 30
+    lr_trim: int = 0
+    invert_yaw: bool = False
+    invert_lr: bool = False
     deadband: float = 0.08
+    arrival_deadband: float = 0.22
     target_area: float = 0.12
     tag_size_m: float = TAG_SIZE_M_DEFAULT
     close_m: float = CLOSE_FEET_DEFAULT * 0.3048
@@ -41,6 +54,7 @@ class Tick:
     yaw: int = 0
     fwd: int = 0
     up: int = 0
+    lr: int = 0
     action: str | None = None  # takeoff | land | photo | None
     box: Box | None = None
     err_x: float | None = None
@@ -64,7 +78,7 @@ def resolve_target(kind: str, family: str, target_tag: int | None, weights: Path
             kind = "wheat"
         else:
             kind = "tag"
-            print("wheat weights missing; target is AprilTag (same pipeline as home)")
+            print("wheat weights missing; target is AprilTag 12, then turn around for home tag 12")
     if kind == "wheat" and not weights.is_file():
         print(f"no {weights}; falling back to AprilTag target")
         kind = "tag"
@@ -175,7 +189,7 @@ class SurveyMission:
 
             action = None
             box = None
-            yaw = fwd = up = 0
+            yaw = fwd = up = lr = 0
             err_x = area = None
             seeking = False
 
@@ -196,7 +210,7 @@ class SurveyMission:
                 if target_box is not None:
                     self._set_phase_locked("approach_target")
                 elif elapsed > SEARCH_TIMEOUT_S:
-                    self._set_phase_locked("search_home")
+                    self._set_phase_locked("turn_home")
 
             elif phase == "approach_target":
                 box = target_box
@@ -206,8 +220,8 @@ class SurveyMission:
                 elif self._reached(target_box, frame.shape, elapsed, now):
                     self._set_phase_locked("survey")
                 elif elapsed > APPROACH_TIMEOUT_S:
-                    print("approach timeout — still not close enough, returning home")
-                    self._set_phase_locked("search_home")
+                    print("approach timeout — turning around for home")
+                    self._set_phase_locked("turn_home")
 
             elif phase == "survey":
                 box = target_box
@@ -215,28 +229,35 @@ class SurveyMission:
                     action = "photo"
                     self._photo_sent = True
                 elif elapsed > 0.4:
-                    if self.same_mark:
-                        self._set_phase_locked("land")
-                    else:
-                        self._set_phase_locked("search_home")
+                    self._set_phase_locked("turn_home")
+
+            elif phase == "turn_home":
+                # Spin in place. Do not lock onto tag 12 while it is still the target in view.
+                yaw = -TURN_YAW if g.invert_yaw else TURN_YAW
+                gone = True
+                if frame is not None and target_box is not None:
+                    gone = tag_width_frac(target_box, frame.shape) < TARGET_GONE_WIDTH
+                if elapsed >= TURN_HOME_S and (gone or elapsed >= TURN_HOME_MAX_S):
+                    self._set_phase_locked("search_home")
 
             elif phase == "search_home":
                 box = home_box
                 seeking = True
                 if home_box is not None:
                     self._set_phase_locked("approach_home")
-                elif elapsed > SEARCH_TIMEOUT_S:
-                    self._set_phase_locked("abort")
+                elif elapsed > SEARCH_HOME_TIMEOUT_S:
+                    print("home tag not found after scout — landing in place")
+                    self._set_phase_locked("land")
 
             elif phase == "approach_home":
                 box = home_box
                 seeking = True
                 if home_box is None:
+                    print("lost home tag — scouting again")
                     self._set_phase_locked("search_home")
                 elif self._reached(home_box, frame.shape, elapsed, now):
                     self._set_phase_locked("land")
-                elif elapsed > APPROACH_TIMEOUT_S:
-                    self._set_phase_locked("land")
+                # Keep flying in until ~2 ft. Do not land just because the tag is visible.
 
             elif phase == "land":
                 if not self._land_sent:
@@ -260,7 +281,7 @@ class SurveyMission:
                 else None
             )
             if box is not None and frame is not None and seeking:
-                yaw, fwd, up, err_x, area = yaw_forward(
+                rc = yaw_forward(
                     box,
                     frame.shape,
                     kp_yaw=g.kp_yaw,
@@ -272,15 +293,25 @@ class SurveyMission:
                     kp_up=g.kp_up,
                     max_up=g.max_up,
                     target_width=need_w,
+                    kp_lr=g.kp_lr,
+                    max_lr=g.max_lr,
+                    lr_trim=g.lr_trim,
+                    invert_yaw=g.invert_yaw,
+                    invert_lr=g.invert_lr,
                 )
+                yaw, fwd, up, lr, err_x, area = rc
             elif seeking and box is None and self.flying:
-                yaw = SEARCH_YAW
+                if phase == "search_home":
+                    yaw, up = self._scout_home(elapsed, g.invert_yaw)
+                else:
+                    yaw = SEARCH_YAW
 
             width = tag_width_frac(box, frame.shape) if box is not None and frame is not None else None
             return Tick(
                 yaw=yaw,
                 fwd=fwd,
                 up=up,
+                lr=lr,
                 action=action,
                 box=box,
                 err_x=err_x,
@@ -294,11 +325,12 @@ class SurveyMission:
         return width_frac_for_distance(self.gains.tag_size_m, self.gains.close_m, shape)
 
     def _close_enough(self, box: Box, shape) -> bool:
+        """Distance first: tag large enough in frame (~2 ft). Center need not be perfect."""
         g = self.gains
-        err_x = (box.cx / shape[1]) - 0.5
         width = tag_width_frac(box, shape)
         need = self._need_width(shape)
-        return abs(err_x) <= g.deadband and width >= need
+        err_x = (box.cx / shape[1]) - 0.5
+        return width >= (0.9 * need) and abs(err_x) <= g.arrival_deadband
 
     def _reached(self, box: Box, shape, elapsed: float, now: float) -> bool:
         if elapsed < MIN_APPROACH_S or not self._close_enough(box, shape):
@@ -308,3 +340,18 @@ class SurveyMission:
             self._dwell_t = now
             return False
         return now - self._dwell_t >= DWELL_S
+
+    def _scout_home(self, elapsed: float, invert_yaw: bool) -> tuple[int, int]:
+        """Sweep yaw both ways and bob altitude so a hidden home tag can appear."""
+        cycle = int(elapsed / SCOUT_HALF_S)
+        sign = 1 if cycle % 2 == 0 else -1
+        if invert_yaw:
+            sign = -sign
+        yaw = SCOUT_YAW * sign
+        mod = cycle % 6
+        up = 0
+        if mod == 2:
+            up = 14
+        elif mod == 5:
+            up = -12
+        return yaw, up

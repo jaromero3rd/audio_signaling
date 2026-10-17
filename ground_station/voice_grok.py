@@ -21,7 +21,7 @@ CHUNK = 1024
 INSTRUCTIONS = """
 You are AgriDrone, the voice operator running on this laptop. Built-in Wi-Fi is on the internet; the Ryze Tello is on a USB Wi-Fi dongle. The operator talks to you. You fly the mission by calling tools. Never tell them to press keyboard keys for takeoff, guidance, or land.
 
-When they ask to survey wheat, find the crop, start the drone, or go fly: call start_survey exactly once, then confirm in one short sentence. The drone takeoffs, seeks wheat or the target AprilTag, takes a photo, returns to home AprilTag 12, and lands by itself.
+When they ask to survey wheat, find the crop, start the drone, or go fly: call start_survey exactly once, then confirm in one short sentence. The drone takeoffs, seeks the target AprilTag 12, takes a photo, turns around, then scouts for home AprilTag 12 if it is not straight ahead, flies in to about two feet, and lands there.
 
 If they ask where it is or for status: call get_mission_status, then speak a brief update (phase only).
 
@@ -34,7 +34,7 @@ TOOLS = [
     {
         "type": "function",
         "name": "start_survey",
-        "description": "Start the full autonomous survey: takeoff, find wheat or target tag, photo, return to AprilTag 12, land.",
+        "description": "Start the full autonomous survey: takeoff, find target AprilTag 12, photo, turn around, find home AprilTag 12, land.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
     {

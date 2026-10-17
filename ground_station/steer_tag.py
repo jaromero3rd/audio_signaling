@@ -41,6 +41,7 @@ def draw_hud(
     yaw: int,
     fwd: int,
     up: int,
+    lr: int,
     flying: bool,
     guidance: bool,
     battery: int | None,
@@ -68,7 +69,7 @@ def draw_hud(
         mode += "+GUIDE"
     lines = [
         mode,
-        f"yaw={yaw:+d}  fwd={fwd:+d}  up={up:+d}",
+        f"yaw={yaw:+d}  fwd={fwd:+d}  up={up:+d}  lr={lr:+d}",
         f"err_x={err_x:+.2f}" if err_x is not None else "no tag",
         f"area={area:.3f}" if area is not None else "",
         f"bat={battery}%" if battery is not None else "",
@@ -160,12 +161,13 @@ def main() -> int:
                     guidance = False
 
             box = detector.detect(frame) if frame is not None else None
-            yaw, fwd, up, err_x, area = (0, 0, 0, None, None)
+            yaw = fwd = up = lr = 0
+            err_x = area = None
             if frame is not None:
                 need_w = width_frac_for_distance(
                     args.tag_size_m, args.close_feet * 0.3048, frame.shape
                 )
-                yaw, fwd, up, err_x, area = yaw_forward(
+                rc = yaw_forward(
                     box,
                     frame.shape,
                     kp_yaw=args.kp_yaw,
@@ -178,13 +180,14 @@ def main() -> int:
                     max_up=args.max_up,
                     target_width=need_w,
                 )
+                yaw, fwd, up, lr, err_x, area = rc
 
             if flying:
                 if stale or not guidance:
                     drone.hover()
-                    yaw, fwd, up = 0, 0, 0
+                    yaw = fwd = up = lr = 0
                 else:
-                    drone.send_rc(0, fwd, up, yaw)
+                    drone.send_rc(lr, fwd, up, yaw)
 
             if t0 - bat_ts > 5:
                 bat = drone.battery()
@@ -192,7 +195,7 @@ def main() -> int:
 
             vis = (
                 draw_hud(
-                    frame, box, err_x, area, yaw, fwd, up, flying, guidance, bat, stale
+                    frame, box, err_x, area, yaw, fwd, up, lr, flying, guidance, bat, stale
                 )
                 if frame is not None
                 else np.zeros((360, 640, 3), dtype=np.uint8)

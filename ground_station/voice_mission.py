@@ -41,6 +41,7 @@ def draw_hud(
     yaw: int,
     fwd: int,
     up: int,
+    lr: int,
     stale: bool,
     battery: int | None,
     tag_w: float | None = None,
@@ -67,7 +68,7 @@ def draw_hud(
     lines = [
         f"PHASE {snap['phase']}",
         f"target={snap['target']}  home=tag-{snap['home_tag']}",
-        f"yaw={yaw:+d} fwd={fwd:+d} up={up:+d}",
+        f"yaw={yaw:+d} fwd={fwd:+d} up={up:+d} lr={lr:+d}",
         f"err_x={err_x:+.2f}" if err_x is not None else "no box",
         f"tag_w={tag_w:.2f} need={need_w:.2f} (~2ft)"
         if tag_w is not None and need_w is not None
@@ -311,7 +312,7 @@ def _run_mission(args, photon, cleanup) -> int:
                 if snap["phase"] in ("idle", "done"):
                     drone.hover()
                 else:
-                    drone.send_rc(0, tick.fwd, tick.up, tick.yaw)
+                    drone.send_rc(tick.lr, tick.fwd, tick.up, tick.yaw)
 
             if t0 - bat_ts > 5:
                 bat = drone.battery()
@@ -326,6 +327,7 @@ def _run_mission(args, photon, cleanup) -> int:
                     tick.yaw,
                     tick.fwd,
                     tick.up,
+                    tick.lr,
                     tick.stale,
                     bat,
                     tag_w=tick.width,
