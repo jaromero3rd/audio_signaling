@@ -6,8 +6,8 @@ import threading
 import time
 from typing import Any, Literal, Protocol
 
-Action = Literal["start_survey", "capture_photo", "land", "abort"]
-ACTIONS = frozenset(("start_survey", "capture_photo", "land", "abort"))
+Action = Literal["start_survey", "capture_photo", "continue_survey", "land", "abort"]
+ACTIONS = frozenset(("start_survey", "capture_photo", "continue_survey", "land", "abort"))
 APPROVAL_TTL_S = 60.0
 MAX_EXTRA_PHOTOS = 2
 
@@ -16,6 +16,8 @@ class Mission(Protocol):
     def snapshot(self) -> dict[str, Any]: ...
     def request_start(self) -> dict[str, Any]: ...
     def request_abort(self) -> dict[str, Any]: ...
+    def analysis_waiting(self) -> bool: ...
+    def continue_survey(self) -> dict[str, Any]: ...
 
 
 class MissionDriver:
@@ -35,6 +37,8 @@ class MissionDriver:
         self._photo_count = 0
         self._started = False
         self._stopped = False
+        self._capture = 0
+        self._analysis_ready = False
 
     def _expire_locked(self) -> None:
         if self._pending and time.monotonic() >= self._pending[1]:
@@ -50,6 +54,9 @@ class MissionDriver:
                 "survey_started": self._started,
                 "extra_photos_remaining": MAX_EXTRA_PHOTOS - self._photo_count,
                 "pending_approval": self._pending[0] if self._pending else None,
+                "capture_id": self._capture,
+                "analysis_ready": self._analysis_ready,
+                "photo_queued": self._photo,
                 "mission": self.mission.snapshot(),
             }
 
@@ -64,6 +71,13 @@ class MissionDriver:
                 return self.stop()
             if self._stopped:
                 return {"ok": False, "reason": "operator_stop_latched"}
+            if action == "continue_survey":
+                if not self._analysis_ready or self._photo or self._pending is not None:
+                    return {"ok": False, "reason": "analysis_or_reimage_pending"}
+                return self.mission.continue_survey()
+            if action == "capture_photo" and getattr(self.mission, "analysis_required", False):
+                if not self.mission.analysis_waiting():
+                    return {"ok": False, "reason": "no_live_analysis_hold"}
             if action == "start_survey":
                 if self._started:
                     return {"ok": False, "reason": "one_survey_per_process"}
@@ -98,12 +112,15 @@ class MissionDriver:
                 self._started = True
             return result
         if action == "capture_photo":
+            if getattr(self.mission, "analysis_required", False) and not self.mission.analysis_waiting():
+                return {"ok": False, "reason": "no_live_analysis_hold"}
             if self._photo:
                 return {"ok": True, "status": "queued", "action": action}
             if self._photo_count >= MAX_EXTRA_PHOTOS:
                 return {"ok": False, "reason": "extra_photo_limit_reached"}
             self._photo_count += 1
             self._photo = True
+            self._analysis_ready = False
             return {"ok": True, "status": "queued", "action": action}
         raise ValueError("Unsupported approved action")
 
@@ -111,6 +128,21 @@ class MissionDriver:
         with self._lock:
             photo, self._photo = self._photo and not self._stopped, False
             return photo
+
+    def begin_analysis(self) -> int:
+        with self._lock:
+            if self._stopped or not self.mission.analysis_waiting():
+                raise RuntimeError("No live analysis hold")
+            self._capture += 1
+            self._analysis_ready = False
+            return self._capture
+
+    def accept_analysis(self, capture_id: int) -> bool:
+        with self._lock:
+            if self._stopped or capture_id != self._capture or not self.mission.analysis_waiting():
+                return False
+            self._analysis_ready = True
+            return True
 
     def stop(self) -> dict[str, Any]:
         with self._lock:

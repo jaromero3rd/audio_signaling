@@ -38,6 +38,7 @@ class RuntimeTests(unittest.TestCase):
     def environment(self, stack):
         stack.enter_context(patch.object(sys, "argv", [
             "demo", "--controller", "droid", "--mock", "--target", "tag", "--no-photon",
+            "--fake-analysis", "--no-voice",
         ]))
         stack.enter_context(patch.object(voice_mission, "load_dotenv"))
         drone = stack.enter_context(patch.object(voice_mission, "MockDrone")).return_value

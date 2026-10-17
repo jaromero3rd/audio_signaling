@@ -19,7 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 RESOURCE_ID = re.compile(r"pho_[a-z]{2,8}_[0-7][0-9a-hjkmnp-tv-z]{25}")
 MESSAGES = {
     "takeoff": "The local drone adapter acknowledged takeoff.",
-    "photo": "A survey photo was saved locally. Crop-health analysis has not been performed.",
+    "photo": "A survey photo was saved locally. Analysis may still be pending.",
+    "analysis": "Survey analysis result",
     "land": "The local drone adapter acknowledged landing.",
     "complete": "The survey state machine completed. See the ground station for results.",
     "abort": "A mission abort was requested. Check the ground station for landing status.",
@@ -181,9 +182,14 @@ class PhotonClient:
             raise PhotonError("Expected one direct agent/user space; set PHOTON_SPACE_ID if needed")
         self._route = matches[0]
 
-    def send(self, event: str, event_id: str, *, mock: bool) -> dict:
+    def send(self, event: str, event_id: str, *, mock: bool, analysis: dict | None = None) -> dict:
         if event not in MESSAGES:
             raise PhotonError("Unknown system notification")
+        text = MESSAGES[event]
+        if event == "analysis":
+            text = analysis_text(analysis)
+        elif analysis is not None:
+            raise PhotonError("Unexpected analysis payload")
         if self._route is None:
             raise PhotonError("Photon routing has not been verified")
         space_id, sender_id = self._route
@@ -195,7 +201,7 @@ class PhotonClient:
                 "senderId": sender_id,
                 # Shared iMessage spaces do not support parentMessageId replies.
                 "content": {"type": "text", "format": "plain",
-                            "text": f"AgriDrone ({'MOCK' if mock else 'TELLO'}): {MESSAGES[event]}"},
+                            "text": f"AgriDrone ({'MOCK' if mock else 'TELLO'}): {text}"},
             },
         )
         message_id = result.get("id")
@@ -214,13 +220,30 @@ class PhotonClient:
         self._http.close()
 
 
+def analysis_text(analysis: dict | None) -> str:
+    from ground_station.agent.analysis import SurveyAnalysis
+
+    try:
+        validated = SurveyAnalysis.model_validate({
+            name: analysis[name] for name in ("field_id", "health_score", "analysis_summary")
+        })
+        source = analysis["vision_source"]
+        if source not in ("grok", "fake"):
+            raise ValueError("Unknown vision source")
+    except (ValueError, TypeError, KeyError):
+        raise PhotonError("Invalid host analysis notification") from None
+    label = "SIMULATED, not a crop diagnosis" if source == "fake" else "Grok visual estimate, not a verified diagnosis"
+    return (f"Field {validated.field_id}: health score {validated.health_score:.2f}. "
+            f"{label}. Findings (untrusted model observations): {validated.analysis_summary}")
+
+
 class PhotonNotifier:
     """Bounded, best-effort delivery off the RC loop; one notification per event."""
 
     def __init__(self, client: PhotonClient, *, mock: bool):
         self.client = client
         self.mock = mock
-        self._queue: queue.Queue[tuple[str, str]] = queue.Queue(maxsize=len(MESSAGES))
+        self._queue: queue.Queue[tuple[str, str, dict | None]] = queue.Queue(maxsize=len(MESSAGES) + 3)
         self._seen: set[str] = set()
         self._lock = threading.Lock()
         self._closing = threading.Event()
@@ -237,24 +260,40 @@ class PhotonNotifier:
 
     def notify(self, event: str) -> None:
         with self._lock:
-            if event not in MESSAGES or event == "test" or event in self._seen or self._closing.is_set():
+            if event not in MESSAGES or event in ("test", "analysis") or event in self._seen or self._closing.is_set():
                 return
             self._seen.add(event)
             try:
-                self._queue.put_nowait((event, f"{self._run_id}:{event}"))
+                self._queue.put_nowait((event, f"{self._run_id}:{event}", None))
             except queue.Full:
                 print("Photon notification queue full; flight control was not blocked.")
+
+    def notify_analysis(self, analysis: dict) -> bool:
+        analysis_text(analysis)
+        receipt = analysis.get("receipt", "")
+        if not isinstance(receipt, str) or not re.fullmatch(r"[a-f0-9]{32}:[1-3]", receipt):
+            raise PhotonError("Invalid host analysis receipt")
+        with self._lock:
+            key = f"analysis:{receipt}"
+            if key in self._seen or self._closing.is_set():
+                return False
+            try:
+                self._queue.put_nowait(("analysis", f"{self._run_id}:{key}", dict(analysis)))
+            except queue.Full:
+                return False
+            self._seen.add(key)
+            return True
 
     def _serve(self) -> None:
         try:
             while not self._closing.is_set() or not self._queue.empty():
                 try:
-                    event, event_id = self._queue.get(timeout=0.1)
+                    event, event_id, analysis = self._queue.get(timeout=0.1)
                 except queue.Empty:
                     continue
                 for attempt in range(3):
                     try:
-                        result = self.client.send(event, event_id, mock=self.mock)
+                        result = self.client.send(event, event_id, mock=self.mock, analysis=analysis)
                         print(f"Photon notification accepted ({event}); delivery is not yet confirmed.")
                         if result["status"] in ("delivered", "read"):
                             print(f"Photon delivery confirmed ({event}).")

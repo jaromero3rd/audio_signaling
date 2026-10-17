@@ -100,6 +100,37 @@ class PhotonTests(unittest.TestCase):
         self.assertIsNone(client._route)
         self.assertFalse(any(request.method == "POST" for request in self.requests))
 
+    def test_analysis_alert_routes_validated_result_and_deduplicates_receipt(self):
+        client = self.client()
+        notifier = PhotonNotifier(client, mock=True)
+        notifier.start()
+        analysis = {
+            "receipt": f"{'a' * 32}:1", "field_id": "field-1", "health_score": 0.2,
+            "analysis_summary": "Visible discoloration. Needs operator review.", "vision_source": "grok",
+        }
+        self.assertTrue(notifier.notify_analysis(analysis))
+        self.assertFalse(notifier.notify_analysis(analysis))
+        notifier.close()
+        posts = [request for request in self.requests if request.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        body = json.loads(posts[0].content)
+        self.assertEqual(body["spaceId"], self.space["id"])
+        self.assertIn("health score 0.20", body["content"]["text"])
+        self.assertIn("Visible discoloration", body["content"]["text"])
+        self.assertNotIn("receipt", body["content"]["text"])
+
+    def test_fake_analysis_is_labeled_and_invalid_payload_never_sent(self):
+        client = self.client()
+        client.check()
+        analysis = {"field_id": "field-1", "health_score": 0.8,
+                    "analysis_summary": "Fixture", "vision_source": "fake"}
+        client.send("analysis", "receipt", mock=True, analysis=analysis)
+        self.assertIn("SIMULATED", json.loads(self.requests[-1].content)["content"]["text"])
+        count = len(self.requests)
+        with self.assertRaises(PhotonError):
+            client.send("analysis", "receipt", mock=True, analysis={**analysis, "health_score": 2})
+        self.assertEqual(count, len(self.requests))
+
     def test_groups_and_cross_project_users_are_rejected(self):
         for invalid in ("group", "cross-project"):
             with self.subTest(invalid=invalid):

@@ -1,16 +1,16 @@
 # AgriDrone: Voice-Directed Field Survey Agent
 
-AgriDrone is a HackHarvard 2026 prototype for voice-directed Tello field surveys, with an optional embedded Factory Droid controller. It detects wheat heads or AprilTags, captures local photos, and performs a bounded return/landing sequence.
+AgriDrone is a HackHarvard 2026 prototype for voice-directed Tello field surveys, controlled by an embedded Factory Droid session. It detects wheat heads or AprilTags, analyzes captured images with Grok, and makes bounded reimage, alert, and return-home decisions.
 
-**The crop-health analysis pipeline is not implemented.** Chalk and Daytona helpers exist separately. Droid mission control and fixed Photon system notifications are now wired into the local runtime, but they do not turn a photograph into a health assessment.
+**The image-analysis decision loop is connected.** Grok's visual assessment is an uncertain model estimate, not a verified crop diagnosis. Real hardware, live vision credentials, and cloud feature deployments still need operator validation.
 
 ## What We Built
 
-- **Voice layer:** Grok Voice can request a survey, read status, and abort.
+- **Voice layer:** Grok Voice queues survey intent to Droid, reads status, and stops immediately through the host.
 - **Flight layer:** The local mission state machine handles takeoff, target approach, photo capture, home search, and landing through Tello or a webcam mock.
-- **SDK controller:** A persistent Factory Droid session can request bounded mission actions through host-controlled tools.
-- **System notifications:** The host can send fixed mission-status iMessages through a verified private Photon assignment.
-- **Standalone cloud helpers:** Chalk computes features from a supplied health score; Daytona can execute scripts in an ephemeral sandbox. Neither is called by the mission yet.
+- **SDK controller:** One persistent Factory Droid session receives validated image analysis and makes tool-driven decisions while local flight control stays independent.
+- **System notifications:** The host sends mission-status and Droid-requested analysis alerts through a verified private Photon assignment.
+- **Features and history:** Local SQLite survey/decision history is persistent. `--chalk` evaluates fresh analyses through the deployed Chalk named query. Daytona remains standalone; this runtime generates no scripts.
 
 ## What's Implemented & Working
 
@@ -20,32 +20,38 @@ AgriDrone is a HackHarvard 2026 prototype for voice-directed Tello field surveys
 | **Local flight control** | Tello adapter and webcam mock | Takeoff → target → photo → home/land |
 | **Wheat/AprilTag detection** | Live `.pt` detector or AprilTag | Supply weights or use a printed tag |
 | **Photo capture & logging** | Saves local stills and paths | View `captures/` |
-| **Chalk feature evaluation** | Standalone helpers | Supply a health score to deployed resolvers |
+| **Chalk feature evaluation** | Optional runtime named query | Enable `--chalk` with deployed resolvers |
 | **Daytona cloud sandbox** | Standalone SDK wrapper | Separate cloud smoke test |
 | **Mission state storage** | Standalone Chalk Volume helpers | Not called by the mission |
 | **Embedded Droid session** | Persistent SDK session and restricted tools | Mock-first launcher below |
 | **Photon system notifications** | Host-owned mission hooks | Configure the existing private iMessage assignment |
-| **End-to-end crop-health decision loop** | Not wired | Image analyzer and cloud orchestration still missing |
+| **Image-analysis decision loop** | Connected and simulated end-to-end | Photo → Grok → Droid → bounded action/alert |
 
 These are implementation boundaries, not a claim that every service is configured, running, or flight-tested.
 
 ## How They're Integrated
 
-### The Voice-Guided Mission Flow
+### The Default Mission Flow
 
 ```text
-Operator speech → Grok Voice mission tools
-                         |
-                  Local SurveyMission
-                         |
-         Camera → wheat/tag detection → local steering
-                         |
-            Photo capture → home search → landing
+Operator speech → Grok Voice → persistent Factory Droid
+                                      |
+                           host tools / local approval
+                                      |
+            Camera → detection → local steering → photo
+                                      |
+                       hover with a fixed deadline
+                                      |
+              Grok image understanding → validated analysis
+                                      |
+             local history + optional Chalk → same Droid
+                                      |
+              reimage / Photon alert / return home / land
 ```
 
-Grok handles conversation; the local controller handles steering. The voice-disabled `--auto` path can start the same state machine directly.
+Grok handles conversation and image understanding; Droid makes high-level decisions. The local controller owns steering. Emergency stop bypasses all cloud work.
 
-### Optional Factory Droid Flow
+### SDK Execution Boundary
 
 ```text
 Initial operator instruction → persistent Droid SDK session
@@ -56,11 +62,11 @@ Initial operator instruction → persistent Droid SDK session
                                       |
                   existing mission and camera/RC loop
                                       |
-                 photo metadata → same Droid session
-                 fixed mission events → Photon user
+              validated analysis → same Droid session
+              mission/analysis alerts → Photon user
 ```
 
-Droid and Grok Voice are alternative controllers, not simultaneous authorities. SDK/model latency runs off the camera/RC thread. Photos remain local; their metadata is not an image-health result.
+Voice is an input adapter to Droid, not a second flight authority. SDK/model latency runs off the camera/RC thread. Image bytes go to xAI; only validated analysis goes to Droid. Reimages never renew the 90-second analysis hold.
 
 ## Why We Chose Each Service
 
@@ -68,19 +74,19 @@ Droid and Grok Voice are alternative controllers, not simultaneous authorities. 
 Realtime speech connects natural requests to `start_survey`, `get_mission_status`, and `abort_mission`. This voice bridge does not perform crop-health image analysis.
 
 ### Chalk
-Online resolvers compute `healthy` / `watch` / `critical`, severity, and recommended action from a supplied health score. Chalk does not inspect the image, and the mission does not currently invoke these helpers.
+Online resolvers compute `healthy` / `watch` / `critical`, severity, and recommended action from Grok's health score when `--chalk` is enabled. Without it, clearly labeled local thresholds provide context. Chalk does not inspect the image.
 
 ### Daytona
 The real SDK wrapper creates a sandbox, executes code, and supports cleanup. Future generated analysis scripts could run there instead of on the host. The current Droid runtime exposes no code-execution tool and does not call Daytona.
 
 ### Photon
-The host sends fixed status notifications to the configured human through an existing direct iMessage space. The model cannot choose recipients or message text. Photo/health-result attachments and incoming mission commands are not implemented.
+The host sends status notifications and validated analysis text to the configured human through an existing direct iMessage space. Droid can request an alert but cannot choose recipients or arbitrary text. This mission runtime does not send image attachments or accept incoming mission commands.
 
 ### Chalk Volume
 JSON snapshot, decision-log, and latest-survey storage helpers exist separately. The mission does not save through them or automatically resume flight after a restart.
 
 ### Droid (Factory)
-The official Python SDK provides one persistent session with `get_mission_status` and `issue_drone_command`. The host bounds commands, approvals, queues, timeouts, turns, and extra photos. See the [SDK runtime guide](ground_station/agent/README.md) for the exact authority boundary.
+The official Python SDK provides one persistent session with status, command, survey-context, and analysis-alert tools. The host bounds commands, approvals, queues, timeouts, turns, and extra photos. See the [SDK runtime guide](ground_station/agent/README.md) for the exact authority boundary.
 
 ## Quick Start
 
@@ -89,17 +95,17 @@ Install [requirements.txt](requirements.txt) in a Python 3.10+ virtual environme
 ### 1. Webcam Mock (No Drone, No Cloud)
 
 ```bash
-python demo.py --mock --target tag --target-tag 12 --home-tag 12 --no-voice --auto
+python demo.py --controller voice --mock --target tag --target-tag 12 --home-tag 12 --no-voice --auto --no-photon
 ```
 
 This opens the webcam/display and prints simulated flight commands. Use a matching printed AprilTag; generate ID 12 with `ground_station/print_apriltag.py --id 12`. It is not a headless test.
 
 ### 2. Add Voice
 
-Configure `XAI_API_KEY` privately and ensure working microphone/speaker devices. Omit `--no-voice` and `--auto` to wait for a spoken request:
+Configure `XAI_API_KEY` privately, authenticate the `droid` CLI, and ensure working microphone/speaker devices. The default controller is Droid and defaults to a webcam mock:
 
 ```bash
-python demo.py --mock --target tag --target-tag 12 --home-tag 12
+python demo.py --mock --target tag --target-tag 12 --home-tag 12 --no-photon
 ```
 
 ### 3. Use the Embedded Droid SDK
@@ -108,10 +114,12 @@ With an authenticated `droid` CLI or `FACTORY_API_KEY`:
 
 ```bash
 python -m ground_station.agent.session --check-sdk
-python -m ground_station.agent.session --target tag --target-tag 12 --home-tag 12 --no-photon
+python -m ground_station.agent.session --target tag --target-tag 12 --home-tag 12 --no-voice --no-photon
 ```
 
-The check opens no hardware and runs no model turn. The second command defaults to the webcam mock. Real SDK-controlled flight requires explicit `--allow-real-flight` and local `y` approval. Space latches a stop; `q` quits.
+The check opens no hardware and runs no model turn. The second command requests a webcam-mock survey and needs `XAI_API_KEY` for real image analysis. Add `--fake-analysis` for explicitly simulated results without xAI. Real SDK-controlled flight requires explicit `--allow-real-flight` and local `y` approval. Space latches a stop; `q` quits.
+
+Run `python tests/live_droid_pipeline.py` for a headless authenticated SDK smoke test. It uses one real Droid session and simulated image/Photon providers, opens no devices, and sends no real messages.
 
 ### 4. Configure System-to-User Photon Messages
 

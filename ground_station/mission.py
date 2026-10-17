@@ -19,6 +19,7 @@ APPROACH_TIMEOUT_S = 60.0
 MIN_APPROACH_S = 1.2
 DWELL_S = 0.6
 FRAME_STALE_S = 0.5
+ANALYSIS_HOLD_S = 90.0
 TURN_HOME_S = 3.5
 TURN_HOME_MAX_S = 6.0
 TURN_YAW = 55
@@ -99,6 +100,7 @@ class SurveyMission:
         gains: Gains,
         weights: Path = DEFAULT_WEIGHTS,
         on_phase: Callable[[str, str], None] | None = None,
+        analysis_required: bool = False,
     ) -> None:
         self.gains = gains
         self.home_tag = home_tag
@@ -108,6 +110,8 @@ class SurveyMission:
         self.home_det = AprilTagDetector(family=family, tag_id=home_tag)
         self.same_mark = self.target_kind == "tag" and target_tag == home_tag
         self.on_phase = on_phase
+        self.analysis_required = analysis_required
+        self._analysis_deadline: float | None = None
         self._lock = threading.RLock()
         self.phase = "idle"
         self.flying = False
@@ -130,6 +134,7 @@ class SurveyMission:
                 "target_seen": self.target_seen,
                 "home_seen": self.home_seen,
                 "last_photo": self.last_photo,
+                "analysis_required": self.analysis_required,
             }
 
     def request_start(self) -> dict[str, Any]:
@@ -152,6 +157,20 @@ class SurveyMission:
     def note_photo(self, path: Path | None) -> None:
         with self._lock:
             self.last_photo = str(path) if path else None
+
+    def analysis_waiting(self) -> bool:
+        with self._lock:
+            return (
+                self.phase == "await_analysis" and self._analysis_deadline is not None
+                and time.time() < self._analysis_deadline
+            )
+
+    def continue_survey(self) -> dict[str, Any]:
+        with self._lock:
+            if not self.analysis_waiting():
+                return {"ok": False, "reason": "no_live_analysis_hold"}
+            self._set_phase_locked("turn_home")
+            return {"ok": True, "phase": self.phase}
 
     def _set_phase_locked(self, phase: str) -> None:
         if phase == self.phase:
@@ -228,8 +247,19 @@ class SurveyMission:
                 if not self._photo_sent:
                     action = "photo"
                     self._photo_sent = True
+                    if self.analysis_required:
+                        self._analysis_deadline = now + ANALYSIS_HOLD_S
+                        self._set_phase_locked("await_analysis")
                 elif elapsed > 0.4:
                     self._set_phase_locked("turn_home")
+
+            elif phase == "await_analysis":
+                # Zero RC while cloud work runs. Reimages never renew this deadline.
+                if self._analysis_deadline is None or now >= self._analysis_deadline:
+                    self._set_phase_locked("abort")
+                    action = "land"
+                    self._land_sent = True
+                    self.flying = False
 
             elif phase == "turn_home":
                 # Spin in place. Do not lock onto tag 12 while it is still the target in view.

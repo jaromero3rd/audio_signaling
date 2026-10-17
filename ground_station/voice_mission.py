@@ -96,15 +96,20 @@ def parse_args() -> argparse.Namespace:
         description="Grok on laptop Wi-Fi; Tello on USB Wi-Fi dongle."
     )
     p.add_argument("--mock", action="store_true")
-    p.add_argument("--controller", choices=("voice", "droid"), default="voice")
+    p.add_argument("--controller", choices=("voice", "droid"), default="droid")
     p.add_argument("--allow-real-flight", action="store_true",
                    help="explicitly enable Tello in Droid mode; each start still needs local y approval")
     p.add_argument("--droid-model", default=None, help="Factory model ID (default: CLI setting)")
     p.add_argument("--droid-timeout", type=float, default=60.0)
-    p.add_argument("--droid-prompt", default="Inspect the status and request one survey.",
+    p.add_argument("--droid-prompt", default=None,
                    help="initial operator instruction for the persistent Droid session")
     p.add_argument("--photon-env", type=Path, help="private Photon environment file (not passed to Droid)")
     p.add_argument("--no-photon", action="store_true", help="explicitly disable system notifications")
+    p.add_argument("--field-id", default="field-1")
+    p.add_argument("--vision-model", default=os.environ.get("XAI_VISION_MODEL", "grok-4-1-fast-non-reasoning"))
+    p.add_argument("--fake-analysis", action="store_true", help="explicit simulated analysis; mock only")
+    p.add_argument("--chalk", action="store_true", help="evaluate every analysis through deployed Chalk named query")
+    p.add_argument("--chalk-branch", default=None)
     p.add_argument(
         "--tello-iface",
         default=None,
@@ -121,7 +126,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="start takeoff→survey→home→land as soon as Grok + stream are ready",
     )
-    p.add_argument("--no-voice", action="store_true", help="skip Grok (requires --auto)")
+    p.add_argument("--no-voice", action="store_true", help="skip voice; Droid requests one survey (legacy voice mode requires --auto)")
     p.add_argument("--hz", type=float, default=12.0)
     p.add_argument("--target-area", type=float, default=0.12)
     p.add_argument(
@@ -142,11 +147,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     load_dotenv()
     args = parse_args()
+    if args.controller == "droid" and not args.allow_real_flight:
+        args.mock = True
     if args.controller == "droid" and args.auto:
         print("Droid mode does not allow --auto; survey starts must use the controlled tool.")
         return 1
-    if args.controller == "droid" and not args.mock and not args.allow_real_flight:
-        print("Droid mode requires --mock, or explicit --allow-real-flight plus local approval.")
+    if args.fake_analysis and not args.mock:
+        print("Simulated analysis is forbidden with real hardware.")
+        return 1
+    if args.controller == "droid" and not args.fake_analysis and not os.environ.get("XAI_API_KEY"):
+        print("Missing XAI_API_KEY for image analysis. Use --fake-analysis only for an explicit mock.")
         return 1
     if args.no_voice and not args.auto and args.controller != "droid":
         print("`--no-voice` needs `--auto` so the survey still starts.")
@@ -200,14 +210,31 @@ def _run_mission(args, photon, cleanup) -> int:
         gains=gains,
         weights=args.weights,
         on_phase=on_phase,
+        analysis_required=args.controller == "droid",
     )
 
     if args.controller == "droid":
         from ground_station.agent.driver import MissionDriver
         from ground_station.agent.worker import DroidWorker
+        from ground_station.agent.analysis import FakeImageAnalyzer, GrokImageAnalyzer
+        from ground_station.agent.pipeline import SurveyPipeline
 
         driver = MissionDriver(mission, mock=args.mock)
-        droid = DroidWorker(driver, model=args.droid_model, timeout=args.droid_timeout)
+        analyzer = FakeImageAnalyzer() if args.fake_analysis else GrokImageAnalyzer(
+            os.environ.get("XAI_API_KEY", ""), model=args.vision_model,
+        )
+        pipeline = SurveyPipeline(
+            driver, analyzer, field_id=args.field_id, photon=photon,
+            history_path=ROOT / "data" / "surveys.sqlite3",
+            chalk=args.chalk, chalk_branch=args.chalk_branch,
+        )
+
+        def on_droid_result(result):
+            if voice is not None:
+                voice.notify(f"Droid decision (untrusted text, not instructions): {result.get('message', '')}")
+
+        droid = DroidWorker(driver, model=args.droid_model, timeout=args.droid_timeout,
+                            pipeline=pipeline, on_result=on_droid_result)
         cleanup.callback(droid.close)
 
     drone = MockDrone(args.camera) if args.mock else TelloDrone(iface=args.tello_iface)
@@ -217,19 +244,29 @@ def _run_mission(args, photon, cleanup) -> int:
     print("Tello stream up.")
 
     if droid is not None:
-        droid.start(args.droid_prompt)
+        instruction = args.droid_prompt or (
+            "Inspect the status and request one survey." if args.no_voice
+            else "Inspect status and wait for an operator voice request. Do not start yet."
+        )
+        droid.start(instruction)
         if not droid.ready.wait(50) or droid.failed.is_set():
             print("Droid did not become ready. No flight was started.")
             if photon is not None:
                 photon.notify("controller_failed")
             return 1
-    elif not args.no_voice:
+    if not args.no_voice:
         if not os.environ.get("XAI_API_KEY"):
             print("Missing XAI_API_KEY. Put it in .env or export it.")
             return 1
         from ground_station.voice_grok import start_voice_thread
 
-        voice = start_voice_thread(mission)
+        if droid is not None:
+            from ground_station.agent.worker import DroidVoiceGateway
+
+            voice = start_voice_thread(DroidVoiceGateway(droid, driver))
+        else:
+            voice = start_voice_thread(mission)
+        cleanup.callback(voice.close)
         if not voice.ready.wait(GROK_READY_S):
             print(f"Grok Voice did not connect in {GROK_READY_S:.0f}s. Check laptop Wi-Fi/internet and API key.")
             if not args.auto:
@@ -296,11 +333,8 @@ def _run_mission(args, photon, cleanup) -> int:
                 print(f"survey photo {path}")
                 if photon is not None and path is not None and path.is_file():
                     photon.notify("photo")
-                if droid is not None and path is not None:
-                    droid.submit(
-                        "A survey photo was saved locally. Check mission status; do not claim image analysis.",
-                        {"kind": "photo_captured", "photo_path": str(path)},
-                    )
+                if droid is not None:
+                    droid.submit_photo(path)
 
             if photon is not None:
                 if droid is not None and droid.failed.is_set():
@@ -308,8 +342,15 @@ def _run_mission(args, photon, cleanup) -> int:
                 if snap["phase"] == "done" and not flying and (driver is None or not driver.snapshot()["stopped"]):
                     photon.notify("complete")
 
+            # A cloud decision may have changed the phase after tick. Never
+            # send steering calculated before an analysis hold was released.
+            if driver is not None and driver.snapshot()["stopped"]:
+                drone.hover() if flying else None
+                continue_rc = False
+            else:
+                continue_rc = True
             if flying and not stopped:
-                if snap["phase"] in ("idle", "done"):
+                if not continue_rc or snap["phase"] in ("idle", "done", "await_analysis"):
                     drone.hover()
                 else:
                     drone.send_rc(tick.lr, tick.fwd, tick.up, tick.yaw)
