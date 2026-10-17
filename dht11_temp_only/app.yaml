@@ -1,0 +1,7 @@
+name: DHT11 BT Sensors
+icon: 📡
+description: >-
+  Read DHT11 + photoresistor on the UNO Q and send raw readings to a computer
+  over Bluetooth. No on-board crop analysis.
+ports: []
+bricks: []
