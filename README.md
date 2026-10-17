@@ -20,11 +20,12 @@ AgriDrone is a HackHarvard 2026 prototype for voice-directed Tello field surveys
 | **Local flight control** | Tello adapter and webcam mock | Takeoff → target → photo → home/land |
 | **Wheat/AprilTag detection** | Live `.pt` detector or AprilTag | Supply weights or use a printed tag |
 | **Photo capture & logging** | Saves local stills and paths | View `captures/` |
-| **Chalk feature evaluation** | Optional runtime named query | Enable `--chalk` with deployed resolvers |
+| **Chalk feature evaluation** | Optional runtime query and cloud regression runner | Enable `--chalk`; run labeled boundary cases separately |
 | **Daytona cloud sandbox** | Standalone SDK wrapper | Separate cloud smoke test |
 | **Mission state storage** | Standalone Chalk Volume helpers | Not called by the mission |
 | **Embedded Droid session** | Persistent SDK session and restricted tools | Mock-first launcher below |
 | **Photon system notifications** | Host-owned mission hooks | Configure the existing private iMessage assignment |
+| **Photon image-alert helper** | Standalone upstream bridge | See `photon-imessage-agent/`; not called by this mission runtime |
 | **Image-analysis decision loop** | Connected and simulated end-to-end | Photo → Grok → Droid → bounded action/alert |
 
 These are implementation boundaries, not a claim that every service is configured, running, or flight-tested.
