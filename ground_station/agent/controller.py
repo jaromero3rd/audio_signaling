@@ -21,19 +21,22 @@ from droid_sdk import (
 from droid_sdk.mcp import create_sdk_mcp_server, tool
 from ground_station.agent.analysis import SurveyAnalysis
 from ground_station.agent.driver import Action, MissionDriver
+from ground_station.agent.sdk_compat import patch_script_permissions
+
+patch_script_permissions()
 
 SERVER_NAME = "agridrone"
 TOOL_NAMES = frozenset(("get_mission_status", "issue_drone_command",
                         "get_survey_context", "send_photon_alert"))
 TOOL_IDS = frozenset(f"{SERVER_NAME}___{name}" for name in TOOL_NAMES)
-# CLI 0.244 injects read-only tool discovery even when explicitly disabled.
-# It does not authorize the discovered tool. All executable IDs remain checked.
-DISCOVERY_TOOLS = frozenset({"ToolSearch"})
+# CLI 0.244 loads MCP tools via ToolSearch + Script (`tools.agridrone.*`).
+# Keep those discoverable; permission handler still gates real MCP calls.
+DISCOVERY_TOOLS = frozenset({"ToolSearch", "Script"})
 TOOL_BUDGET = 12
 TURN_BUDGET = 16
 SYSTEM_PROMPT = """You are AgriDrone's high-level mission controller.
-Only use the supplied mission tools. Never request shell/file access,
-other MCP servers, generated code execution, arbitrary RC or waypoint flight.
+Only use the supplied mission tools (via Script/tools.agridrone.* if required).
+Never request shell/file access, other MCP servers, arbitrary RC or waypoints.
 ToolSearch may only discover those mission tools, not other capabilities.
 The host owns all physical actions, permissions, capture paths and recipients.
 Read get_mission_status before acting. There is at most one survey per process.
@@ -66,6 +69,7 @@ class DroidController:
         *,
         model: str | None = None,
         timeout: float = 60.0,
+        machine_id: str | None = None,
         session_factory=Session,
         pipeline=None,
     ):
@@ -74,6 +78,7 @@ class DroidController:
         self.driver = driver
         self.model = model
         self.timeout = timeout
+        self.machine_id = (machine_id or "").strip() or None
         self._factory = session_factory
         self.pipeline = pipeline
         self._session = None
@@ -114,9 +119,11 @@ class DroidController:
             autonomy=Autonomy.OFF,
             disable_builtin_skills=True,
             system_prompt=SYSTEM_PROMPT,
-            restrict_tools=TOOL_IDS,
-            disabled_tools={"Script", "ToolSearch", "WaitForScript"},
+            # Script+ToolSearch required on CLI 0.244 to invoke MCP tools.
+            restrict_tools=TOOL_IDS | DISCOVERY_TOOLS,
+            disabled_tools={"WaitForScript", "Execute", "Read", "Write", "Edit", "Task"},
             mcp_servers=[self.server],
+            machine_id=self.machine_id,
         )
 
     def _consume_call(self) -> None:
@@ -129,6 +136,7 @@ class DroidController:
 
     @staticmethod
     def permission(request):
+        # After sdk_compat rewrite, Script→MCP shows up as McpToolAction rows.
         approved = bool(request.actions) and all(
             isinstance(action, McpToolAction)
             and action.server_name == SERVER_NAME
@@ -170,8 +178,14 @@ class DroidController:
     async def _verify_tools(self) -> None:
         inventory = await self._session.list_tools()
         allowed = {entry.id for entry in inventory if entry.allowed}
-        if allowed - DISCOVERY_TOOLS != TOOL_IDS:
-            raise ControllerError("SDK did not enforce the mission-only tool allowlist")
+        # Mission MCP tools must be present; Script/ToolSearch may also be allowed.
+        if not TOOL_IDS.issubset(allowed):
+            raise ControllerError("SDK did not expose the AgriDrone mission tools")
+        extra = allowed - TOOL_IDS - DISCOVERY_TOOLS
+        if extra:
+            raise ControllerError(
+                f"SDK allowed unexpected tools: {sorted(extra)[:8]}"
+            )
         servers = await self._session.list_mcp_servers()
         if any(server.name != SERVER_NAME for server in servers.servers):
             raise ControllerError("Run with only the AgriDrone MCP server configured")

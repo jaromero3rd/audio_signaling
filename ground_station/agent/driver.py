@@ -27,10 +27,19 @@ class MissionDriver:
     existing camera/RC loop, never an SDK callback, owns all hardware calls.
     """
 
-    def __init__(self, mission: Mission, *, mock: bool, drone_id: str = "drone-1"):
+    def __init__(
+        self,
+        mission: Mission,
+        *,
+        mock: bool,
+        drone_id: str = "drone-1",
+        auto_approve: bool = False,
+    ):
         self.mission = mission
         self.mock = mock
         self.drone_id = drone_id
+        # When True, start_survey / capture_photo run without local y key.
+        self.auto_approve = bool(auto_approve or mock)
         self._lock = threading.RLock()
         self._pending: tuple[Action, float] | None = None
         self._photo = False
@@ -83,7 +92,7 @@ class MissionDriver:
                     return {"ok": False, "reason": "one_survey_per_process"}
                 if self.mission.snapshot()["phase"] not in ("idle", "done"):
                     return {"ok": False, "reason": "mission_busy"}
-            if self.mock:
+            if self.auto_approve:
                 return self._execute_locked(action)
             # Neither the model nor any MCP tool can approve this request.
             if self._pending is None:

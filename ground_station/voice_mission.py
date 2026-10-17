@@ -65,12 +65,19 @@ def draw_hud(
             cv2.LINE_AA,
         )
     snap = mission.snapshot()
+    seen = []
+    if snap.get("target_seen"):
+        seen.append("target")
+    if snap.get("home_seen"):
+        seen.append(f"home-{snap['home_tag']}")
     lines = [
         f"PHASE {snap['phase']}",
         f"target={snap['target']}  home=tag-{snap['home_tag']}",
+        f"seen={'+'.join(seen) if seen else 'none'}  "
+        f"{'BOX' if box is not None else 'no-box'}",
         f"yaw={yaw:+d} fwd={fwd:+d} up={up:+d} lr={lr:+d}",
-        f"err_x={err_x:+.2f}" if err_x is not None else "no box",
-        f"tag_w={tag_w:.2f} need={need_w:.2f} (~2ft)"
+        f"err_x={err_x:+.2f}" if err_x is not None else "",
+        f"tag_w={tag_w:.2f} need={need_w:.2f}"
         if tag_w is not None and need_w is not None
         else "",
         f"bat={battery}%" if battery is not None else "",
@@ -101,13 +108,31 @@ def parse_args() -> argparse.Namespace:
                    help="explicitly enable Tello in Droid mode; each start still needs local y approval")
     p.add_argument("--droid-model", default=None, help="Factory model ID (default: CLI setting)")
     p.add_argument("--droid-timeout", type=float, default=60.0)
+    p.add_argument(
+        "--droid-machine",
+        default=None,
+        help="Factory Computer id. Do NOT use for mission control: SDK MCP tools are "
+             "loopback-only on this laptop, so e2b cannot call start_survey. Keep e2b for "
+             "optional heavy compute later; mission Droid stays local.",
+    )
+    p.add_argument(
+        "--droid-e2b",
+        action="store_true",
+        help="attach SessionConfig.machine_id from FACTORY_COMPUTER_ID (breaks mission MCP tools)",
+    )
     p.add_argument("--droid-prompt", default=None,
                    help="initial operator instruction for the persistent Droid session")
     p.add_argument("--photon-env", type=Path, help="private Photon environment file (not passed to Droid)")
     p.add_argument("--no-photon", action="store_true", help="explicitly disable system notifications")
     p.add_argument("--field-id", default="field-1")
     p.add_argument("--vision-model", default=os.environ.get("XAI_VISION_MODEL", "grok-4-1-fast-non-reasoning"))
-    p.add_argument("--fake-analysis", action="store_true", help="explicit simulated analysis; mock only")
+    p.add_argument(
+        "--crop-analysis",
+        action="store_true",
+        help="after survey photo, pause for Grok crop-health (needs XAI_API_KEY); default off — "
+             "AprilTag/YOLO steer locally, Droid only issues high-level start/continue/land",
+    )
+    p.add_argument("--fake-analysis", action="store_true", help="explicit simulated crop analysis; mock only")
     p.add_argument("--chalk", action="store_true", help="evaluate every analysis through deployed Chalk named query")
     p.add_argument("--chalk-branch", default=None)
     p.add_argument(
@@ -171,12 +196,25 @@ def main() -> int:
     if args.fake_analysis and not args.mock:
         print("Simulated analysis is forbidden with real hardware.")
         return 1
-    if args.controller == "droid" and not args.fake_analysis and not os.environ.get("XAI_API_KEY"):
-        print("Missing XAI_API_KEY for image analysis. Use --fake-analysis only for an explicit mock.")
+    # Crop-health Grok is opt-in. Default path: local AprilTag/YOLO + Droid high-level tools.
+    args.want_crop = bool(args.crop_analysis or args.fake_analysis)
+    if args.crop_analysis and not args.fake_analysis and not os.environ.get("XAI_API_KEY"):
+        print("Missing XAI_API_KEY for --crop-analysis. Omit that flag for local tag/wheat flight.")
         return 1
     if args.no_voice and not args.auto and args.controller != "droid":
         print("`--no-voice` needs `--auto` so the survey still starts.")
         return 1
+    if args.droid_e2b and not args.droid_machine:
+        args.droid_machine = os.environ.get("FACTORY_COMPUTER_ID") or None
+        if not args.droid_machine:
+            print("--droid-e2b needs FACTORY_COMPUTER_ID in .env or --droid-machine <id>")
+            return 1
+    if args.droid_machine:
+        print(
+            "WARNING: --droid-machine / --droid-e2b points the agent at a remote Computer, "
+            "but mission MCP tools stay on 127.0.0.1 → Droid usually cannot start_survey. "
+            "Prefer local Droid (default) for flight control."
+        )
 
     with ExitStack() as cleanup:
         photon = None
@@ -226,31 +264,51 @@ def _run_mission(args, photon, cleanup) -> int:
         gains=gains,
         weights=args.weights,
         on_phase=on_phase,
-        analysis_required=args.controller == "droid",
+        # Hold for cloud crop-health only when explicitly requested.
+        analysis_required=args.want_crop,
     )
 
     if args.controller == "droid":
         from ground_station.agent.driver import MissionDriver
         from ground_station.agent.worker import DroidWorker
-        from ground_station.agent.analysis import FakeImageAnalyzer, GrokImageAnalyzer
-        from ground_station.agent.pipeline import SurveyPipeline
 
-        driver = MissionDriver(mission, mock=args.mock)
-        analyzer = FakeImageAnalyzer() if args.fake_analysis else GrokImageAnalyzer(
-            os.environ.get("XAI_API_KEY", ""), model=args.vision_model,
+        # --no-voice real flight: takeoff without pressing y (space still aborts).
+        driver = MissionDriver(
+            mission, mock=args.mock, auto_approve=bool(args.no_voice),
         )
-        pipeline = SurveyPipeline(
-            driver, analyzer, field_id=args.field_id, photon=photon,
-            history_path=ROOT / "data" / "surveys.sqlite3",
-            chalk=args.chalk, chalk_branch=args.chalk_branch,
-        )
+        pipeline = None
+        if args.want_crop:
+            from ground_station.agent.analysis import FakeImageAnalyzer, GrokImageAnalyzer
+            from ground_station.agent.pipeline import SurveyPipeline
+
+            analyzer = FakeImageAnalyzer() if args.fake_analysis else GrokImageAnalyzer(
+                os.environ.get("XAI_API_KEY", ""), model=args.vision_model,
+            )
+            pipeline = SurveyPipeline(
+                driver, analyzer, field_id=args.field_id, photon=photon,
+                history_path=ROOT / "data" / "surveys.sqlite3",
+                chalk=args.chalk, chalk_branch=args.chalk_branch,
+            )
+            print("Crop analysis on: host → Grok (or fake) → Droid decide continue/land.")
+        else:
+            print("Vision local: AprilTag/YOLO on laptop. Droid = high-level start/land only.")
 
         def on_droid_result(result):
             if voice is not None:
                 voice.notify(f"Droid decision (untrusted text, not instructions): {result.get('message', '')}")
 
-        droid = DroidWorker(driver, model=args.droid_model, timeout=args.droid_timeout,
-                            pipeline=pipeline, on_result=on_droid_result)
+        if args.droid_machine:
+            print(f"Droid session → Factory Computer {args.droid_machine[:8]}… (remote; MCP may fail)")
+        else:
+            print("Droid session → local CLI (mission tools on this laptop)")
+        droid = DroidWorker(
+            driver,
+            model=args.droid_model,
+            timeout=args.droid_timeout,
+            machine_id=args.droid_machine,
+            pipeline=pipeline,
+            on_result=on_droid_result,
+        )
         cleanup.callback(droid.close)
 
     drone = (
@@ -279,6 +337,12 @@ def _run_mission(args, photon, cleanup) -> int:
             if photon is not None:
                 photon.notify("controller_failed")
             return 1
+        # Host fallback: CLI/SDK Script MCP can still flake; --no-voice must survey.
+        if args.no_voice and driver is not None and not driver.snapshot()["survey_started"]:
+            time.sleep(2.0)
+            if not driver.snapshot()["survey_started"]:
+                result = driver.issue(driver.drone_id, "start_survey")
+                print(f"Host start_survey (no-voice fallback): {result}")
     if not args.no_voice:
         if not os.environ.get("XAI_API_KEY"):
             print("Missing XAI_API_KEY. Put it in .env or export it.")
@@ -313,7 +377,10 @@ def _run_mission(args, photon, cleanup) -> int:
     flying = False
 
     if droid is not None:
-        print("Droid controls mission requests. y = approve pending request, space = stop, q = quit.")
+        if driver is not None and driver.auto_approve:
+            print("Droid + auto-approve (--no-voice). Takeoff without y. Space = stop, q = quit.")
+        else:
+            print("Droid controls mission requests. y = approve pending request, space = stop, q = quit.")
     elif args.auto:
         print("Survey starting. Space = abort, q = quit.")
     else:
@@ -358,7 +425,7 @@ def _run_mission(args, photon, cleanup) -> int:
                 print(f"survey photo {path}")
                 if photon is not None and path is not None and path.is_file():
                     photon.notify("photo")
-                if droid is not None:
+                if droid is not None and args.want_crop:
                     droid.submit_photo(path)
 
             if photon is not None:

@@ -245,7 +245,8 @@ class SurveyMission:
             seeking = False
 
             if phase == "idle" or phase == "done":
-                pass
+                # Still expose detections so the HUD proves AprilTag/YOLO work before takeoff.
+                box = target_box or home_box
 
             elif phase == "takeoff":
                 if not self._takeoff_sent:

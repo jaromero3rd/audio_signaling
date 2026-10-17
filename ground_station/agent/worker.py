@@ -14,10 +14,12 @@ from ground_station.agent.driver import MissionDriver
 
 class DroidWorker:
     def __init__(self, driver: MissionDriver, *, model=None, timeout=60.0,
-                 pipeline=None, controller_factory=DroidController, on_result=None):
+                 machine_id=None, pipeline=None, controller_factory=DroidController,
+                 on_result=None):
         self.driver = driver
         self.model = model
         self.timeout = timeout
+        self.machine_id = machine_id
         self.pipeline = pipeline
         self.controller_factory = controller_factory
         self.on_result = on_result
@@ -74,7 +76,11 @@ class DroidWorker:
         self._task = asyncio.current_task()
         try:
             async with self.controller_factory(
-                self.driver, model=self.model, timeout=self.timeout, pipeline=self.pipeline,
+                self.driver,
+                model=self.model,
+                timeout=self.timeout,
+                machine_id=self.machine_id,
+                pipeline=self.pipeline,
             ) as controller:
                 self.ready.set()
                 while not self._stop.is_set() and not self.failed.is_set():

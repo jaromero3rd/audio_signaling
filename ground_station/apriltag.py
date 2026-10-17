@@ -24,12 +24,27 @@ def dictionary_for(family: str):
     return cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, key))
 
 
+def _detector_params():
+    params = cv2.aruco.DetectorParameters()
+    # Webcam / phone-screen prints: tolerate blur, glare, and slight perspective.
+    if hasattr(params, "cornerRefinementMethod") and hasattr(cv2.aruco, "CORNER_REFINE_APRILTAG"):
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
+    if hasattr(params, "adaptiveThreshWinSizeMin"):
+        params.adaptiveThreshWinSizeMin = 3
+        params.adaptiveThreshWinSizeMax = 23
+        params.adaptiveThreshWinSizeStep = 10
+    if hasattr(params, "minMarkerPerimeterRate"):
+        params.minMarkerPerimeterRate = 0.02
+    if hasattr(params, "polygonalApproxAccuracyRate"):
+        params.polygonalApproxAccuracyRate = 0.08
+    return params
+
+
 def detect_markers(gray: np.ndarray, dictionary):
     if hasattr(cv2.aruco, "ArucoDetector"):
-        params = cv2.aruco.DetectorParameters()
-        det = cv2.aruco.ArucoDetector(dictionary, params)
+        det = cv2.aruco.ArucoDetector(dictionary, _detector_params())
         return det.detectMarkers(gray)
-    return cv2.aruco.detectMarkers(gray, dictionary)
+    return cv2.aruco.detectMarkers(gray, dictionary, parameters=_detector_params())
 
 
 class AprilTagDetector:
