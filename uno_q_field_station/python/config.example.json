@@ -1,5 +1,5 @@
 {
-  "ground_station_url": "http://192.168.1.10:8765/telemetry",
+  "ground_station_url": "http://REPLACE_WITH_LAPTOP_WIFI_IP:8765/telemetry",
   "device_id": "unoq-field-01",
   "sample_relay_timeout_s": 2.0,
   "wifi": {
