@@ -202,22 +202,34 @@ def main(argv: list[str] | None = None) -> int:
 
     store = TelemetryStore(args.log, args.mic_file)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(store))
-    print(f"telemetry  http://{args.host}:{args.port}/telemetry")
-    print(f"mic stream http://{args.host}:{args.port}/mic  -> {args.mic_file}")
+    post_url = f"http://127.0.0.1:{args.port}/telemetry"
     try:
         from drone_interface.field_links import ground_station_url
 
         tether = ground_station_url(args.port)
         if tether:
-            print(f"Uno Q on phone hotspot should POST {tether}")
+            post_url = tether
     except Exception:
         pass
-    print("Grok Voice (farmer commands) is separate: ground_station/voice_grok.py")
-    print(f"Listening on http://{args.host}:{args.port}")
-    print(f"  Browser check:  http://127.0.0.1:{args.port}/latest")
-    print(f"  UNO Q POSTs to: http://<THIS-PC-WIFI-IP>:{args.port}/telemetry")
-    print(f"  Mic POST:       http://<THIS-PC-WIFI-IP>:{args.port}/mic  -> {args.mic_file}")
-    print("Watch this terminal for live T=/RH= lines when the board connects.")
+    print("Mac is LISTENING (this is supposed to sit here). Samples appear only after the board POSTs.")
+    print(f"Put this on the board as ground_station_url:\n  {post_url}")
+    print(f"Browser: http://127.0.0.1:{args.port}/health")
+    print("Ctrl-C to stop.")
+
+    def _heartbeat() -> None:
+        while True:
+            time.sleep(8.0)
+            n = store.count
+            if n == 0:
+                print(
+                    f"still waiting (0 samples). Board must be on the phone hotspot and "
+                    f"POSTing {post_url}",
+                    flush=True,
+                )
+            else:
+                print(f"ok: {n} samples received", flush=True)
+
+    threading.Thread(target=_heartbeat, name="sensor-wait", daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

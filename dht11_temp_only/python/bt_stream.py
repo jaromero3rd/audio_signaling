@@ -11,6 +11,7 @@ IMPORTANT (Arduino UNO Q / App Lab):
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import socket
 import threading
@@ -19,6 +20,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+APPLE_HOTSPOT_NET = ipaddress.ip_network("172.20.10.0/28")
 
 DEVICE_NAME = "AgriDrone-UNOQ"
 TCP_PORT = 9123
@@ -30,6 +33,26 @@ HOST_RELAY_CANDIDATES = (
     "172.10.0.1",   # mentioned on Arduino forums
 )
 _CONFIG_PATH = Path(__file__).with_name("config.json")
+
+
+def _health_ok(url: str, timeout_s: float = 0.6) -> bool:
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            return 200 <= getattr(resp, "status", 200) < 300
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def discover_ground_station(port: int = 8765) -> str | None:
+    """Find the Mac on iPhone USB/Wi-Fi hotspot LAN (172.20.10.0/28)."""
+    for host in APPLE_HOTSPOT_NET.hosts():
+        if _health_ok(f"http://{host}:{port}/health"):
+            url = f"http://{host}:{port}/telemetry"
+            print(f"[cfg] auto ground_station_url={url}", flush=True)
+            return url
+    print("[cfg] auto-discover failed; set ground_station_url to the Mac USB IP", flush=True)
+    return None
 
 
 def load_config() -> dict[str, Any]:
@@ -78,6 +101,9 @@ class SensorStream:
 
         cfg = load_config()
         self.ground_url = str(cfg.get("ground_station_url") or "").strip()
+        if not self.ground_url or self.ground_url.lower() == "auto":
+            found = discover_ground_station()
+            self.ground_url = found or ""
         self.device_id = str(cfg.get("device_id") or "unoq-dht11")
         self._http_ok = False
         self._http_error: str | None = None
