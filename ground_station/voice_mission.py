@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 from drone_interface.tello_client import MockDrone, TelloDrone
 from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
+from ground_station.grok_image import analyze_photo_with_grok_async
 from ground_station.mission import CLOSE_FEET_DEFAULT, FRAME_STALE_S, Gains, TAG_SIZE_M_DEFAULT, SurveyMission
 from ground_station.vision import DEFAULT_WEIGHTS, Box
 
@@ -235,6 +236,11 @@ def main() -> int:
                 path = drone.capture_photo()
                 mission.note_photo(path)
                 print(f"survey photo {path}")
+                if path:
+                    def on_grok_complete(analysis):
+                        print(f"photo analysis: health={analysis.get('health_score'):.2f} summary={analysis.get('analysis_summary')[:50]}...")
+                        mission.last_analysis = analysis
+                    analyze_photo_with_grok_async(path, on_grok_complete)
 
             if flying:
                 if snap["phase"] in ("idle", "done"):
