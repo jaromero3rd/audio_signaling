@@ -1,11 +1,14 @@
 /*
- * AgriDrone — Uno Q MCU sketch (STM32 side)
+ * AprilTag climate scout — Uno Q MCU sketch (STM32 side)
  *
  * Roles:
  *   - Read temp / humidity (BME280 I2C preferred; DHT22 optional fallback)
- *   - Expose samples to Linux via Arduino Bridge RPC
+ *   - Expose climate samples to Linux via Arduino Bridge RPC
  *   - Append JSON lines to SPI microSD when Linux asks (offline failover)
  *   - Drive a status LED: boot / online / offline / error
+ *
+ * Product context: waypoints are AprilTags; this MCU only handles sensors/SD/LEDs.
+ * Linux MPU owns host relay + offline AprilTag seek.
  *
  * VERIFY ON HARDWARE (hackathon placeholders):
  *   - I2C pins for BME280 (Uno Q defaults usually Wire)

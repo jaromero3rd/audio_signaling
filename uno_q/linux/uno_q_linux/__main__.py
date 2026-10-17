@@ -9,7 +9,9 @@ from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Uno Q Linux coordinator (AgriDrone)")
+    parser = argparse.ArgumentParser(
+        description="Uno Q Linux coordinator (AprilTag waypoints + climate → ground station)"
+    )
     parser.add_argument(
         "--config",
         type=str,

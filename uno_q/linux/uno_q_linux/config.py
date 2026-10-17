@@ -39,7 +39,7 @@ class Config:
     sample_hz: float = 1.0
     sensor_backend: str = "bridge"  # bridge | mock
     i2c_addr: str = "0x76"
-    sd_dir: str = "/mnt/sd/agridrone"
+    sd_dir: str = "/mnt/sd/apriltag_climate"
     apriltag_family: str = "36h11"
     apriltag_ids: list[int] = field(default_factory=lambda: [0, 1, 2])
     camera: str = "0"

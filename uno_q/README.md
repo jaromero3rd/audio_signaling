@@ -1,20 +1,25 @@
-# Arduino Uno Q — sensor relay, SD failover, offline AprilTag seek
+# Arduino Uno Q — AprilTag waypoints + climate telemetry
 
-Hackathon-pragmatic edge stack for **AgriDrone / Hack Harvard**. The Uno Q acts as a climate + mission hub:
+Hackathon edge stack (Hack Harvard): the Uno Q surveys a field marked with **AprilTag waypoints**, measures **humidity / temperature** (+ extensible sensors), and **relays samples to the host ground station** when Wi‑Fi is up. If the host is unreachable, it **logs to microSD** and **seeks AprilTags** onboard until the link returns.
 
 | Mode | Condition | Behavior |
 | --- | --- | --- |
-| **ONLINE** | Host reachable over Wi‑Fi | Stream sensor (+ mission) samples to the laptop ground station |
+| **ONLINE** | Host reachable over Wi‑Fi | Stream climate (+ mission / tag) samples to the laptop ground station |
 | **OFFLINE** | Host unreachable | Log the same JSONL to microSD **and** run AprilTag seek/hold on the Linux MPU |
 
 ```
+AprilTag markers (waypoints / survey points)
+        │
 Sensors (I2C) ──► MCU sketch ──Bridge──► Linux coordinator
                                           │
                      ┌────────────────────┼────────────────────┐
                      ▼                    ▼                    ▼
               Host HTTP POST        SD card JSONL      AprilTag seek
               (when ONLINE)         (when OFFLINE)     (when OFFLINE)
+              ground station
 ```
+
+**Primary product story:** AprilTags as waypoints/survey markers → climate telemetry → ground station. Not a wheat-anomaly / crop-CV product (other folders in the repo may still contain wheat tooling; this `uno_q/` hub does not depend on them).
 
 ## Honesty note (AprilTags + “AI”)
 
@@ -31,7 +36,7 @@ uno_q/
 ├── config.example.yaml       # alternate YAML config
 ├── mcu/
 │   └── sensor_bridge/
-│       └── sensor_bridge.ino # STM32 sketch: sensors, SD, LED status
+│       └── sensor_bridge.ino # STM32 sketch: climate sensors, SD, LED status
 ├── linux/
 │   ├── requirements.txt
 │   └── uno_q_linux/          # Python package (run on board or laptop mock)
@@ -40,7 +45,7 @@ uno_q/
 │       ├── connectivity.py   # host ping / Wi‑Fi check
 │       ├── sensors.py        # Bridge RPC or mock generator
 │       ├── sd_logger.py      # JSONL failover (+ optional backlog flush)
-│       ├── host_client.py    # HTTP telemetry to laptop
+│       ├── host_client.py    # HTTP telemetry to laptop ground station
 │       ├── apriltag_seek.py  # detect + seek/hold when offline
 │       ├── bridge_rpc.py     # Arduino Bridge helpers / mock
 │       └── nav_assist_stub.py
@@ -50,16 +55,17 @@ uno_q/
     └── demo_offline.sh
 ```
 
-Host receiver stub (laptop): [`../ground_station/uno_q_receiver.py`](../ground_station/uno_q_receiver.py)
+Host receiver stub (laptop ground station): [`../ground_station/uno_q_receiver.py`](../ground_station/uno_q_receiver.py)
 
 ## Hardware Maxim must confirm
 
 | Item | Assumed default (verify!) | Why |
 | --- | --- | --- |
-| **Temp/humidity** | BME280 on I2C (`0x76`/`0x77`) — DHT22 fallback pins documented in sketch | Sensor driver + wiring |
+| **Temp/humidity** | BME280 on I2C (`0x76`/`0x77`) — DHT22 fallback pins documented in sketch | Climate telemetry |
 | **SD module** | SPI microSD (CS pin in sketch / config) | Offline logger |
 | **Camera** | USB UVC webcam on Uno Q Linux **or** mock image folder | AprilTag seek needs frames |
 | **Host Wi‑Fi** | Laptop hotspot / LAN IP; Uno Q joins same SSID | Connectivity watchdog |
+| **Printed AprilTags** | Family `36h11` (configurable); waypoint IDs in config | Survey markers |
 | **LEDs** | Built-in / GPIO status LED | ONLINE vs OFFLINE at a glance |
 
 Pins in `sensor_bridge.ino` are **placeholders** — comment blocks mark what to verify on the physical board / shield.
@@ -90,7 +96,7 @@ Important knobs:
 
 ## Flash / run on Uno Q
 
-### MCU (sensors + SD)
+### MCU (climate sensors + SD)
 
 1. Open `mcu/sensor_bridge/sensor_bridge.ino` in Arduino IDE / App Lab for Uno Q.
 2. Select the Uno Q board; install Adafruit BME280 (or DHT) + SD libs as needed.
@@ -113,7 +119,7 @@ python3 -m uno_q_linux --config uno_q/config.env
 
 `PYTHONPATH` must include `uno_q/linux` (scripts set this). The package reuses `ground_station.apriltag` and `ground_station.control` when available.
 
-### Host laptop receiver
+### Host laptop ground station receiver
 
 ```bash
 # Terminal A — laptop
@@ -126,7 +132,7 @@ python3 -m ground_station.uno_q_receiver --port 8787
 ## Demo: online vs offline
 
 ```bash
-# Fake hardware, force ONLINE (host must be listening or use --allow-drop)
+# Fake hardware, force ONLINE (host must be listening or samples fall back to SD)
 ./uno_q/scripts/demo_online.sh
 
 # Fake hardware, force OFFLINE → SD log + AprilTag seek on synthetic frames
@@ -138,17 +144,17 @@ python3 -m ground_station.uno_q_receiver --port 8787
 
 **Expected:**
 
-- **Online:** JSON lines POST to host; LED mode `online`; no seek commands (or idle).
-- **Offline:** append-only JSONL under `UNO_Q_SD_DIR`; AprilTag seek prints yaw/fwd hold commands; LED mode `offline`.
+- **Online:** JSON climate samples POST to ground station; LED mode `online`; no seek commands (or idle).
+- **Offline:** append-only JSONL under `UNO_Q_SD_DIR`; AprilTag seek prints yaw/fwd hold commands toward waypoint tags; LED mode `offline`.
 - **Reconnect:** coordinator flips back to ONLINE and prefers host relay; set `UNO_Q_FLUSH_BACKLOG=1` to POST queued SD lines after reconnect (best-effort).
 
 ## State machine
 
 ```
 BOOT → probe host
-  ├─ reachable  → ONLINE  → read sensors → POST host → sleep
-  └─ unreachable → OFFLINE → read sensors → SD append
-                              └─ AprilTag detect → seek/hold tick
+  ├─ reachable  → ONLINE  → read climate sensors → POST ground station → sleep
+  └─ unreachable → OFFLINE → read climate sensors → SD append
+                              └─ AprilTag detect → seek/hold toward waypoint
   (every cycle re-probe; hysteresis via UNO_Q_OFFLINE_GRACE_S)
 ```
 
@@ -171,5 +177,6 @@ PYTHONPATH=uno_q/linux:. UNO_Q_MOCK=1 python3 -m uno_q_linux --once
 BME280  VIN→3V3  GND→GND  SCL→SCL  SDA→SDA
 microSD VIN→5V/3V3(module)  GND→GND  MOSI/MISO/SCK/CS→SPI (CS = pin in sketch)
 USB cam → Uno Q USB-C hub (Linux UVC)
+Printed AprilTags → field / table as waypoints
 Uno Q Wi‑Fi → same AP as laptop (HOST_IP = laptop LAN address)
 ```

@@ -1,4 +1,4 @@
-"""ONLINE → host relay; OFFLINE → SD log + AprilTag seek."""
+"""ONLINE → climate telemetry to ground station; OFFLINE → SD + AprilTag seek."""
 
 from __future__ import annotations
 

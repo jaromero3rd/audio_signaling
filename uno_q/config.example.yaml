@@ -1,7 +1,7 @@
 # Alternate config (loaded if --config points at a .yaml / .yml file)
 host_ip: 192.168.4.2
 host_url: http://192.168.4.2:8787/telemetry
-wifi_ssid: AgriDroneHost
+wifi_ssid: FieldHost
 mock: false
 force_offline: false
 force_online: false
@@ -10,7 +10,7 @@ offline_grace_s: 3.0
 sample_hz: 1.0
 sensor_backend: bridge  # bridge | mock
 i2c_addr: "0x76"
-sd_dir: /mnt/sd/agridrone
+sd_dir: /mnt/sd/apriltag_climate
 apriltag_family: 36h11
 apriltag_ids: [0, 1, 2]
 camera: "0"

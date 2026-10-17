@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Minimal host telemetry receiver for Uno Q Linux coordinator.
+"""Ground-station stub: receive Uno Q climate (+ mission) telemetry.
+
+Pairs with uno_q/linux coordinator. Product story: AprilTag waypoints +
+humidity/temperature relayed here when Wi‑Fi to the host is up.
 
 Usage (laptop):
   python3 -m ground_station.uno_q_receiver --port 8787
 
 Endpoints:
   GET  /health     → {"ok": true}
-  POST /telemetry  → JSON sensor/mission sample from the board
+  POST /telemetry  → JSON climate / mission sample from the board
 """
 
 from __future__ import annotations
@@ -71,7 +74,9 @@ class TelemetryHandler(BaseHTTPRequestHandler):
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Uno Q host telemetry receiver")
+    p = argparse.ArgumentParser(
+        description="Ground station receiver for Uno Q climate telemetry"
+    )
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=8787)
     p.add_argument(
@@ -86,7 +91,10 @@ def main(argv: list[str] | None = None) -> int:
     TelemetryHandler.log_path = args.log
     TelemetryHandler.quiet = args.quiet
     server = ThreadingHTTPServer((args.host, args.port), TelemetryHandler)
-    print(f"uno_q_receiver listening on http://{args.host}:{args.port}  (POST /telemetry)")
+    print(
+        f"uno_q_receiver (climate telemetry) on http://{args.host}:{args.port}  "
+        f"(POST /telemetry)"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -1,4 +1,4 @@
-"""HTTP telemetry client → laptop ground_station.uno_q_receiver."""
+"""HTTP climate telemetry client → laptop ground_station.uno_q_receiver."""
 
 from __future__ import annotations
 
