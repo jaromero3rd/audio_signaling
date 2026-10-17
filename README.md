@@ -20,7 +20,7 @@ The demo flies a mock or real Tello drone, detects wheat heads or AprilTags, cap
 | **Local flight control** | Fully working | Takeoff → search → photo → land via Tello or webcam mock |
 | **Wheat/AprilTag detection** | Fully working | Live YOLO detection and steering |
 | **Photo capture & logging** | Fully working | Saves still images, records paths |
-| **Chalk feature evaluation** | Helpers ready | Health scoring and decision rules defined |
+| **Chalk feature evaluation** | Implemented (cloud standalone) | Runs labeled boundary cases against deployed decision features |
 | **Daytona cloud sandbox** | SDK wrapper ready | Can run analysis scripts in the cloud |
 | **Mission state storage** | Chalk Volume helpers ready | JSON snapshots and decision logs on Volume |
 | **Embedded Droid session** | Not yet built | Hooks for runtime agent planned |

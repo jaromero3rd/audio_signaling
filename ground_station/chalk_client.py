@@ -14,8 +14,8 @@ Feature namespace (deployed from chalk/ via `chalk apply`):
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
-from chalk.client import ChalkClient
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,15 +28,19 @@ SURVEY_OUTPUTS = [
     f"{FS}.recommended_action",
 ]
 
-_client_instance: ChalkClient | None = None
+_client_instance: Any | None = None
 
 
-def get_client() -> ChalkClient:
+def get_client() -> Any:
     """Shared client. Reads CHALK_CLIENT_ID/SECRET, CHALK_ENVIRONMENT and
     optional CHALK_API_SERVER from the environment (raises a descriptive
     ChalkAuthException if credentials are missing)."""
     global _client_instance
     if _client_instance is None:
+        # Keep schema/eval helpers importable for local unit tests even when
+        # the optional cloud SDK has not been installed.
+        from chalk.client import ChalkClient
+
         _client_instance = ChalkClient()
     return _client_instance
 
