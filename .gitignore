@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 captures/
 datasets/
+data/
 runs/
+.cache/
+wheat/gwhd.yaml
 *.pt
 yolov8*.pt
