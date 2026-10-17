@@ -3,8 +3,6 @@
 Do not load cloud credentials just to import the local controller.
 """
 
-from ground_station.agent.droid_session import DroidSession
-
 __all__ = [
     "DroidSession",
     "append_decision",
@@ -17,6 +15,10 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name == "DroidSession":
+        from ground_station.agent.droid_session import DroidSession
+
+        return DroidSession
     if name in __all__ and name != "DroidSession":
         from ground_station.agent import store
 

@@ -6,9 +6,9 @@
  *   - Photoresistor on A0 → ambient light (voltage divider)
  *   - MicroSD (SPI)       → CS=D10, MOSI=D11, MISO=D12, SCK=D13
  *
- * Microphone is NOT on the MCU and is NOT used for Grok Voice here.
+ * Microphone is NOT on the MCU and is NOT used for ElevenAgents here.
  * Linux (mic_capture / mic_transfer) only captures PCM and POSTs it to the
- * ground laptop. Farmer voice commands run on the laptop via voice_grok.py.
+ * ground laptop. Farmer voice commands run on the laptop via voice_eleven.py.
  */
 
 #include <Arduino.h>

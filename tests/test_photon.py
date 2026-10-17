@@ -106,7 +106,7 @@ class PhotonTests(unittest.TestCase):
         notifier.start()
         analysis = {
             "receipt": f"{'a' * 32}:1", "field_id": "field-1", "health_score": 0.2,
-            "analysis_summary": "Visible discoloration. Needs operator review.", "vision_source": "grok",
+            "analysis_summary": "Visible discoloration. Needs operator review.", "vision_source": "droid",
         }
         self.assertTrue(notifier.notify_analysis(analysis))
         self.assertFalse(notifier.notify_analysis(analysis))

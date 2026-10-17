@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Demo mission: Tello on Mac Wi-Fi; internet + Uno Q via USB phone hotspot.
+"""Demo mission: ElevenAgents input, persistent Droid decisions, Photon output.
 
-One process. No takeoff/land keys. Speak “survey the wheat”, or pass --auto
-to start as soon as Grok and the Tello stream are up.
+Default radios: Tello on Mac Wi-Fi; internet + Uno Q via USB phone hotspot.
+
+Speak “survey the wheat”, or use --no-voice to request a survey through Droid.
 
 Or use --controller droid for the embedded Factory SDK controller.
 Space aborts. q quits. y approves a pending Droid hardware request.
@@ -25,14 +26,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from drone_interface.tello_client import MockDrone, TelloDrone
-from ground_station.chalk_eval_mission import evaluate_and_log
 from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
 from ground_station.mission import CLOSE_FEET_DEFAULT, FRAME_STALE_S, Gains, TAG_SIZE_M_DEFAULT, SurveyMission
 from ground_station.overlay import draw_hud_lines
 from ground_station.vision import DEFAULT_WEIGHTS, Box
 
-GROK_READY_S = 20.0
+VOICE_READY_S = 20.0
 
 
 def draw_hud(
@@ -92,10 +92,10 @@ def draw_hud(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Tello on built-in Wi-Fi; internet on USB phone hotspot."
+        description="Factory + ElevenLabs + Photon via USB phone hotspot; Tello on Mac Wi-Fi."
     )
     p.add_argument("--mock", action="store_true")
-    p.add_argument("--controller", choices=("voice", "droid"), default="droid")
+    p.add_argument("--controller", choices=("droid",), default="droid")
     p.add_argument("--allow-real-flight", action="store_true",
                    help="explicitly enable Tello in Droid mode; each start still needs local y approval")
     p.add_argument("--droid-model", default=None, help="Factory model ID (default: CLI setting)")
@@ -116,12 +116,13 @@ def parse_args() -> argparse.Namespace:
                    help="initial operator instruction for the persistent Droid session")
     p.add_argument("--photon-env", type=Path, help="private Photon environment file (not passed to Droid)")
     p.add_argument("--no-photon", action="store_true", help="explicitly disable system notifications")
+    p.add_argument("--voice-notes", action="store_true",
+                   help="operator requests voice notes for non-critical analysis alerts too")
     p.add_argument("--field-id", default="field-1")
-    p.add_argument("--vision-model", default=os.environ.get("XAI_VISION_MODEL", "grok-4-1-fast-non-reasoning"))
     p.add_argument(
         "--crop-analysis",
         action="store_true",
-        help="after survey photo, pause for Grok crop-health (needs XAI_API_KEY); default off — "
+        help="after survey photo, pause for native Droid crop-health image analysis; default off — "
              "AprilTag/YOLO steer locally, Droid only issues high-level start/continue/land",
     )
     p.add_argument("--fake-analysis", action="store_true", help="explicit simulated crop analysis; mock only")
@@ -157,9 +158,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--auto",
         action="store_true",
-        help="start takeoff→survey→home→land as soon as Grok + stream are ready",
+        help="legacy flag, rejected: use Droid voice intent or --no-voice",
     )
-    p.add_argument("--no-voice", action="store_true", help="skip voice; Droid requests one survey (legacy voice mode requires --auto)")
+    p.add_argument("--no-voice", action="store_true", help="skip voice; Droid requests one survey with normal approval")
     p.add_argument("--hz", type=float, default=12.0)
     p.add_argument("--target-area", type=float, default=0.12)
     p.add_argument(
@@ -188,13 +189,11 @@ def main() -> int:
     if args.fake_analysis and not args.mock:
         print("Simulated analysis is forbidden with real hardware.")
         return 1
-    # Crop-health Grok is opt-in. Default path: local AprilTag/YOLO + Droid high-level tools.
+    # Crop-health is opt-in. Default path: local AprilTag/YOLO + Droid high-level tools.
     args.want_crop = bool(args.crop_analysis or args.fake_analysis)
-    if args.crop_analysis and not args.fake_analysis and not os.environ.get("XAI_API_KEY"):
-        print("Missing XAI_API_KEY for --crop-analysis. Omit that flag for local tag/wheat flight.")
-        return 1
-    if args.no_voice and not args.auto and args.controller != "droid":
-        print("`--no-voice` needs `--auto` so the survey still starts.")
+    if not args.no_voice and not all(os.environ.get(name, "").strip() for name in
+                                    ("ELEVENLABS_API_KEY", "ELEVENLABS_AGENT_ID")):
+        print("Set ELEVENLABS_API_KEY and ELEVENLABS_AGENT_ID, or use --no-voice.")
         return 1
     if args.droid_e2b and not args.droid_machine:
         args.droid_machine = os.environ.get("FACTORY_COMPUTER_ID") or None
@@ -212,18 +211,25 @@ def main() -> int:
         photon = None
         if not args.no_photon and (args.controller == "droid" or args.photon_env is not None):
             from ground_station.photon import PhotonClient, PhotonConfig, PhotonError, PhotonNotifier
+            from ground_station.voice_note import VoiceNoteError, VoiceNoteSynthesizer
 
             try:
                 config = PhotonConfig.load(args.photon_env)
                 if config is not None:
                     client = PhotonClient(config)
-                    photon = PhotonNotifier(client, mock=args.mock)
+                    try:
+                        voice_notes = VoiceNoteSynthesizer.from_env()
+                    except VoiceNoteError:
+                        client.close()
+                        raise
+                    photon = PhotonNotifier(client, mock=args.mock, voice_notes=voice_notes,
+                                            voice_requested=args.voice_notes)
                     photon.start()
                     cleanup.callback(photon.close)
                     print("Photon system notifications configured for the verified private user.")
                 elif args.controller == "droid":
                     print("Photon is not configured; use --photon-env to enable system notifications.")
-            except PhotonError as error:
+            except (PhotonError, VoiceNoteError) as error:
                 print(f"Photon setup failed: {error}. No drone connection opened.")
                 return 1
         return _run_mission(args, photon, cleanup)
@@ -267,24 +273,19 @@ def _run_mission(args, photon, cleanup) -> int:
         from ground_station.agent.driver import MissionDriver
         from ground_station.agent.worker import DroidWorker
 
-        # --no-voice real flight: takeoff without pressing y (space still aborts).
-        driver = MissionDriver(
-            mission, mock=args.mock, auto_approve=bool(args.no_voice),
-        )
+        driver = MissionDriver(mission, mock=args.mock)
         pipeline = None
         if args.want_crop:
-            from ground_station.agent.analysis import FakeImageAnalyzer, GrokImageAnalyzer
+            from ground_station.agent.analysis import FakeImageAnalyzer, DroidImageAnalyzer
             from ground_station.agent.pipeline import SurveyPipeline
 
-            analyzer = FakeImageAnalyzer() if args.fake_analysis else GrokImageAnalyzer(
-                os.environ.get("XAI_API_KEY", ""), model=args.vision_model,
-            )
+            analyzer = FakeImageAnalyzer() if args.fake_analysis else DroidImageAnalyzer()
             pipeline = SurveyPipeline(
                 driver, analyzer, field_id=args.field_id, photon=photon,
                 history_path=ROOT / "data" / "surveys.sqlite3",
                 chalk=args.chalk, chalk_branch=args.chalk_branch,
             )
-            print("Crop analysis on: host → Grok (or fake) → Droid decide continue/land.")
+            print("Crop analysis on: native image → persistent Droid → host validation → decision.")
         else:
             print("Vision local: AprilTag/YOLO on laptop. Droid = high-level start/land only.")
 
@@ -332,39 +333,18 @@ def _run_mission(args, photon, cleanup) -> int:
             if photon is not None:
                 photon.notify("controller_failed")
             return 1
-        # Host fallback: CLI/SDK Script MCP can still flake; --no-voice must survey.
-        if args.no_voice and driver is not None and not driver.snapshot()["survey_started"]:
-            time.sleep(2.0)
-            if not driver.snapshot()["survey_started"]:
-                result = driver.issue(driver.drone_id, "start_survey")
-                print(f"Host start_survey (no-voice fallback): {result}")
     if not args.no_voice:
-        if not os.environ.get("XAI_API_KEY"):
-            print("Missing XAI_API_KEY. Put it in .env or export it.")
-            droid.close()
-            return 1
-        from ground_station.voice_grok import start_voice_thread
+        from ground_station.voice_eleven import start_voice_thread
 
-        if droid is not None:
-            from ground_station.agent.worker import DroidVoiceGateway
+        from ground_station.agent.worker import DroidVoiceGateway
 
-            voice = start_voice_thread(DroidVoiceGateway(droid, driver))
-        else:
-            voice = start_voice_thread(mission)
+        voice = start_voice_thread(DroidVoiceGateway(droid, driver))
         cleanup.callback(voice.close)
-        if not voice.ready.wait(GROK_READY_S):
-            print(f"Grok Voice did not connect in {GROK_READY_S:.0f}s. Check laptop Wi-Fi/internet and API key.")
-            if not args.auto:
-                return 1
-            print("Continuing without voice because --auto was set.")
-            voice = None
+        if not voice.ready.wait(VOICE_READY_S):
+            print(f"ElevenAgents did not connect in {VOICE_READY_S:.0f}s. Check agent settings and internet.")
+            return 1
         else:
-            print("Grok is running on this laptop.")
-
-    if args.auto:
-        mission.request_start()
-        if voice is not None:
-            voice.notify("Survey is starting automatically. Do not call start_survey. Narrate briefly.")
+            print("ElevenAgents command session is running on this laptop.")
 
     last_ok = time.time()
     bat = drone.battery()
@@ -373,12 +353,10 @@ def _run_mission(args, photon, cleanup) -> int:
     flying = False
 
     if droid is not None:
-        if driver is not None and driver.auto_approve:
-            print("Droid + auto-approve (--no-voice). Takeoff without y. Space = stop, q = quit.")
+        if args.mock:
+            print("Droid mock: simulated requests need no y. Space = stop, q = quit.")
         else:
             print("Droid controls mission requests. y = approve pending request, space = stop, q = quit.")
-    elif args.auto:
-        print("Survey starting. Space = abort, q = quit.")
     else:
         print("Say “survey the wheat”. Space = abort, q = quit.")
     try:
@@ -423,25 +401,6 @@ def _run_mission(args, photon, cleanup) -> int:
                     photon.notify("photo")
                 if droid is not None and args.want_crop:
                     droid.submit_photo(path)
-                elif path and os.environ.get("XAI_API_KEY"):
-                    # Fire-and-forget Grok still (origin/main) when not in crop-hold pipeline.
-                    from ground_station.grok_image import analyze_photo_with_grok_async
-
-                    def on_grok_complete(analysis, _path=path):
-                        print(
-                            f"photo analysis: health={analysis.get('health_score'):.2f} "
-                            f"summary={str(analysis.get('analysis_summary', ''))[:50]}..."
-                        )
-                        mission.last_analysis = analysis
-                        chalk_result = evaluate_and_log(
-                            photo_url=str(_path),
-                            health_score=analysis.get("health_score", 0.0),
-                            field_id=analysis.get("field_id", "field-0"),
-                        )
-                        mission.last_chalk_result = chalk_result
-                        print(f"chalk eval: flag={chalk_result['health_flag']} severity={chalk_result['severity']:.2f} action={chalk_result['action']}")
-
-                    analyze_photo_with_grok_async(path, on_grok_complete)
 
             if photon is not None:
                 if droid is not None and droid.failed.is_set():
@@ -500,7 +459,7 @@ def _run_mission(args, photon, cleanup) -> int:
             if key == ord(" "):
                 driver.stop() if driver is not None else mission.request_abort()
 
-            if snap["phase"] == "done" and args.auto and args.no_voice:
+            if snap["phase"] == "done" and args.no_voice:
                 break
 
             dt = time.time() - t0

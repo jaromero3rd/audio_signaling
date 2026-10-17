@@ -97,7 +97,7 @@ def resolve_target(kind: str, family: str, target_tag: int | None, weights: Path
 
 
 class SurveyMission:
-    """Thread-safe state machine. Grok (or --auto) calls request_start / request_abort."""
+    """Thread-safe local state machine. The host driver owns start and abort requests."""
 
     def __init__(
         self,

@@ -4,7 +4,7 @@
   /telemetry  — DHT11 / light / autonomy JSON
   /mic        — raw microphone chunks from the UNO Q (capture + transfer only)
 
-Farmer voice commands (Grok Voice) stay on this laptop via voice_grok.py —
+Farmer voice commands (ElevenAgents) stay on this laptop via voice_eleven.py —
 they are not handled by the UNO Q.
 
 Run:
@@ -212,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Uno Q on phone hotspot should POST {tether}")
     except Exception:
         pass
-    print("Grok Voice (farmer commands) is separate: ground_station/voice_grok.py")
+    print("ElevenAgents (farmer commands) is separate: ground_station/voice_eleven.py")
     print(f"Listening on http://{args.host}:{args.port}")
     print(f"  Browser check:  http://127.0.0.1:{args.port}/latest")
     print(f"  UNO Q POSTs to: http://<THIS-PC-WIFI-IP>:{args.port}/telemetry")

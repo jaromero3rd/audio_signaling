@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Send a compact drone-camera vision summary to the UNO Q.
 
-The Tello camera is processed on this laptop (OpenCV / YOLO / Grok).
+The Tello camera is processed on this laptop (OpenCV / YOLO; Droid for crop photos).
 The UNO Q should NOT get raw video — only a small JSON hint it can fuse
 with DHT11 + photoresistor readings.
 

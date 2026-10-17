@@ -34,13 +34,13 @@ trained on labeled field days.
 | **Object detection** | Find crop rows / bare soil / irrigation equipment |
 | **Time-series on device** | Detect multi-hour drying trends, not single snapshots |
 
-Farmer **voice commands** stay on the laptop (Grok Voice). The UNO Q’s job is
+Farmer **voice commands** stay on the laptop (ElevenAgents). The UNO Q’s job is
 **sense + local interpret + relay**.
 
 ## Drone onboard camera → Arduino UNO Q
 
 The flying camera (Tello) already streams to the **laptop** in this repo
-(`drone_interface/tello_client.py`, YOLO/AprilTag/Grok vision). The UNO Q should
+(`drone_interface/tello_client.py`, YOLO/AprilTag and Droid crop-photo analysis). The UNO Q should
 **not** ingest raw video over Wi‑Fi (too heavy). Instead:
 
 ```

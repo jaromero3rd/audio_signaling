@@ -28,6 +28,6 @@
     "device": null,
     "mic_url": null,
     "invert_light": false,
-    "note": "Mic transfer OFF by default — only DHT11/light telemetry to /telemetry."
+    "note": "Mic transfer OFF by default — only DHT11/light telemetry to /telemetry. ElevenAgents commands run on the laptop (voice_eleven.py), not here."
   }
 }

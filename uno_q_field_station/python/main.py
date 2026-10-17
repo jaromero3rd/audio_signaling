@@ -6,8 +6,8 @@ Roles:
   - Linux mic: capture PCM and transfer to the ground computer
   - Wi-Fi down: buffer env rows on SD; buffer mic bytes locally
 
-Farmer voice commands use Grok Voice on the *laptop*
-(ground_station/voice_grok.py) — not this board.
+Farmer voice commands use ElevenAgents on the *laptop*
+(ground_station/voice_eleven.py) — not this board.
 """
 
 from __future__ import annotations
@@ -406,7 +406,7 @@ def main() -> None:
         f"Field station up -> {telemetry_url} "
         f"(mock={MOCK}, mic_transfer={_mic_xfer is not None})"
     )
-    print("Note: Grok Voice / farmer commands run on the laptop, not this board.")
+    print("Note: ElevenAgents / farmer commands run on the laptop, not this board.")
 
     if MOCK:
         mt = threading.Thread(target=_mock_sample_loop, args=(stop,), daemon=True)
