@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from drone_interface.tello_client import MockDrone, TelloDrone
+from ground_station.agent import DroidSession
 from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
 from ground_station.grok_image import analyze_photo_with_grok_async
@@ -175,6 +176,9 @@ def main() -> int:
         on_phase=on_phase,
     )
 
+    droid = DroidSession()
+    print("Droid session initialized.")
+
     drone = MockDrone(args.camera) if args.mock else TelloDrone(iface=args.tello_iface)
     drone.connect()
     drone.stream_on()
@@ -183,6 +187,7 @@ def main() -> int:
     if not args.no_voice:
         if not os.environ.get("XAI_API_KEY"):
             print("Missing XAI_API_KEY. Put it in .env or export it.")
+            droid.close()
             return 1
         from ground_station.voice_grok import start_voice_thread
 
@@ -191,6 +196,7 @@ def main() -> int:
             print(f"Grok Voice did not connect in {GROK_READY_S:.0f}s. Check laptop Wi-Fi/internet and API key.")
             if not args.auto:
                 drone.close()
+                droid.close()
                 return 1
             print("Continuing without voice because --auto was set.")
             voice = None
@@ -294,6 +300,7 @@ def main() -> int:
             except Exception:
                 drone.emergency()
         drone.close()
+        droid.close()
         cv2.destroyAllWindows()
     return 0
 
