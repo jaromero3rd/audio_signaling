@@ -13,13 +13,13 @@ Deployed via `chalk apply`. Store-free pieces:
 """
 import datetime as dt
 
-import chalk
+from chalk import NamedQuery
 from chalk.features import DataFrame, features, online
 from chalk.monitoring import Chart, Series
 
 EVALUATE_SURVEY_QUERY = "evaluate_field_survey"
 
-chalk.NamedQuery(
+NamedQuery(
     name=EVALUATE_SURVEY_QUERY,
     input=[
         "field_survey.id",
@@ -36,7 +36,7 @@ chalk.NamedQuery(
     ],
 )
 
-Chart(name="field-survey-eval-health", keep=True).with_series(
+Chart(name="field-survey-eval-health").with_series(
     Series.query_success_ratio_metric().where(query_name=EVALUATE_SURVEY_QUERY)
 )
 

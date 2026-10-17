@@ -39,9 +39,10 @@ def validate_survey_result(result: dict) -> list[str]:
         violations.append(f"severity {severity!r} outside [0, 1]")
     elif flag in _FLAG_SEVERITY_BANDS:
         lo, hi = _FLAG_SEVERITY_BANDS[flag]
-        # watch/critical bands are open at the low edge (score < upper threshold)
-        in_band = lo <= severity <= hi if flag == "healthy" else lo < severity <= hi
-        if not in_band:
+        # Bands closed at both edges: compute_severity rounds to 3 decimals,
+        # so scores at threshold boundaries can round a valid severity onto
+        # the band edge.
+        if not lo <= severity <= hi:
             violations.append(f"severity {severity} inconsistent with flag {flag!r} (band {lo}-{hi})")
     return violations
 
@@ -66,7 +67,6 @@ def evaluate_survey_named(
     if not 0.0 <= health_score <= 1.0:
         raise ValueError(f"input check failed: health_score {health_score} outside [0, 1]")
     survey_id = str(uuid.uuid4())
-    kwargs = {"branch": branch} if branch is not None else {}
     res = get_client().query(
         input={
             f"{FS}.id": survey_id,
@@ -77,7 +77,7 @@ def evaluate_survey_named(
             f"{FS}.analysis_summary": analysis_summary,
         },
         query_name=EVALUATE_SURVEY_QUERY,
-        **kwargs,
+        branch=branch,
     )
     if res.errors:
         raise RuntimeError(f"chalk resolver errors: {res.errors}")

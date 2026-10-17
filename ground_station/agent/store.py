@@ -33,24 +33,32 @@ STATE_PATH = "mission_state.json"
 LOG_PATH = "decision_log.jsonl"
 FIELDS_PREFIX = "fields/"
 
-_stub = None
+_volume_ensured = False
 
 
 def _volume_stub():
-    """Shared VolumeService stub on the ChalkClient's authenticated
-    channel; ensures the state volume exists on first use."""
-    global _stub
-    if _stub is None:
-        channel = get_client()._get_grpc_client()._stub_refresher._stub.server_channel
-        stub = volume_pb2_grpc.VolumeServiceStub(channel)
+    """Fresh VolumeService stub on the ChalkClient's current authenticated
+    channel. Resolved per call - the SDK's StubRefresher can close and swap
+    the channel underneath us (GOAWAY/LB rotation), so a cached stub would
+    silently bind to a dead channel mid-session."""
+    global _volume_ensured
+    channel = get_client()._get_grpc_client()._stub_refresher._stub.server_channel
+    if channel is None:
+        raise RuntimeError("chalk grpc channel is not initialized")
+    stub = volume_pb2_grpc.VolumeServiceStub(channel)
+    if not _volume_ensured:
         try:
             stub.GetVolume(volume_pb2.GetVolumeRequest(name=VOLUME))
         except grpc.RpcError as e:
             if e.code() != grpc.StatusCode.NOT_FOUND:
                 raise
-            stub.CreateVolume(volume_pb2.CreateVolumeRequest(name=VOLUME))
-        _stub = stub
-    return _stub
+            try:
+                stub.CreateVolume(volume_pb2.CreateVolumeRequest(name=VOLUME))
+            except grpc.RpcError as e2:
+                if e2.code() != grpc.StatusCode.ALREADY_EXISTS:
+                    raise
+        _volume_ensured = True
+    return stub
 
 
 def _read_file(path: str) -> bytes | None:
@@ -62,6 +70,8 @@ def _read_file(path: str) -> bytes | None:
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.NOT_FOUND:
             return None
+        # Raw stub calls bypass the SDK's _retry_callable, so transient
+        # UNAVAILABLE/UNAUTHENTICATED errors surface un-retried here.
         raise
 
 
