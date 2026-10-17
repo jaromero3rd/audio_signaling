@@ -1,0 +1,3 @@
+ggwave==0.4.3
+numpy
+sounddevice
