@@ -1,0 +1,25 @@
+{
+  "name": "agridrone-grok-team",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/main.ts start",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "doctor": "bun run src/main.ts doctor",
+    "bootstrap": "bun run src/main.ts bootstrap",
+    "connect": "bun run src/main.ts connect",
+    "ask": "bun run src/main.ts ask",
+    "workspace": "bun run src/main.ts workspace",
+    "status": "bun run src/main.ts status",
+    "ship": "bun run src/main.ts ship"
+  },
+  "dependencies": {
+    "discord.js": "^14.26.4"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.9.0"
+  }
+}
