@@ -1,0 +1,9 @@
+profiles:
+  default:
+    fqbn: arduino:zephyr:unoq
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - DHT sensor library (1.4.6)
+      - Adafruit Unified Sensor (1.1.14)
+default_profile: default

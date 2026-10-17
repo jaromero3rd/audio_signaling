@@ -1,0 +1,30 @@
+{
+  "ground_station_url": "http://192.168.1.10:8765/telemetry",
+  "device_id": "unoq-field-01",
+  "sample_relay_timeout_s": 2.0,
+  "wifi": {
+    "ssid": "AgriDroneGround",
+    "min_rssi_dbm": -75,
+    "check_interval_s": 2.0,
+    "lost_grace_s": 8.0
+  },
+  "station": {
+    "name": "home_wifi",
+    "home_apriltag_id": 12,
+    "lat": null,
+    "lon": null,
+    "note": "Fill lat/lon if GPS is available; otherwise home_apriltag_id is used."
+  },
+  "autonomy": {
+    "enabled": true,
+    "return_after_offline_s": 15.0,
+    "rssi_memory_s": 120.0
+  },
+  "audio": {
+    "transfer": true,
+    "device": null,
+    "mic_url": null,
+    "invert_light": false,
+    "note": "UNO Q only captures + transfers mic PCM to ground /mic. Grok Voice / farmer commands run on the laptop (voice_grok.py), not here."
+  }
+}

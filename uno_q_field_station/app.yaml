@@ -1,0 +1,9 @@
+name: AgriDrone Field Station
+icon: 📡
+description: >-
+  Read temperature/humidity on the UNO Q MCU, relay samples to the ground
+  computer over Wi-Fi, buffer to an SD card when offline, and autonomously
+  navigate back toward the last known Wi-Fi station.
+ports:
+  - 8766
+bricks: []
