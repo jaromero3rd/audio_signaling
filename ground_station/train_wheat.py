@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ground_station.vision import DEFAULT_WEIGHTS
+from ground_station.vision import DEFAULT_PT
 
 DATA_YAML = Path(__file__).resolve().parent / "wheat.yaml"
 
@@ -80,9 +80,9 @@ def main() -> int:
     if not best.is_file():
         print(f"training finished but {best} is missing", file=sys.stderr)
         return 1
-    DEFAULT_WEIGHTS.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(best, DEFAULT_WEIGHTS)
-    print(f"copied {best} → {DEFAULT_WEIGHTS}")
+    DEFAULT_PT.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(best, DEFAULT_PT)
+    print(f"copied {best} → {DEFAULT_PT}")
     print("run: python ground_station/steer_wheat.py --mock")
     return 0
 

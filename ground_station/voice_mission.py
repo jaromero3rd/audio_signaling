@@ -67,7 +67,7 @@ def draw_hud(
         f"target={snap['target']}  home=tag-{snap['home_tag']}",
         f"yaw={yaw:+d} fwd={fwd:+d} up={up:+d} lr={lr:+d}",
         f"err_x={err_x:+.2f}" if err_x is not None else "no box",
-        f"tag_w={tag_w:.2f} need={need_w:.2f} (~2ft)"
+        f"size={tag_w:.3f} need={need_w:.3f}"
         if tag_w is not None and need_w is not None
         else "",
         f"bat={battery}%" if battery is not None else "",
@@ -101,7 +101,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--family", choices=sorted(FAMILIES), default="36h11")
     p.add_argument("--home-tag", type=int, default=12)
-    p.add_argument("--target", choices=("auto", "wheat", "tag"), default="auto")
+    p.add_argument(
+        "--target",
+        choices=("auto", "wheat", "tag"),
+        default="auto",
+        help="wheat = heads (YOLO or HSV). tag = AprilTag. Home is always --home-tag.",
+    )
     p.add_argument("--target-tag", type=int, default=12)
     p.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
     p.add_argument(
@@ -112,6 +117,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-voice", action="store_true", help="skip Grok (requires --auto)")
     p.add_argument("--hz", type=float, default=12.0)
     p.add_argument("--target-area", type=float, default=0.12)
+    p.add_argument(
+        "--wheat-close-frac",
+        type=float,
+        default=0.015,
+        help="wheat is close enough when typical head box / image area reaches this (default 0.015)",
+    )
     p.add_argument(
         "--close-feet",
         type=float,
@@ -134,9 +145,14 @@ def main() -> int:
         print("`--no-voice` needs `--auto` so the survey still starts.")
         return 1
 
-    print("Network: built-in Wi-Fi → internet/Grok; USB dongle → Tello.")
+    if args.mock:
+        print("Computer test: webcam. Target=wheat, home=AprilTag "
+              f"{args.home_tag}. Point cam at wheat, then at tag {args.home_tag}.")
+    else:
+        print("Network: built-in Wi-Fi → internet/Grok; USB dongle → Tello.")
     gains = Gains(
         target_area=args.target_area,
+        wheat_close_frac=args.wheat_close_frac,
         tag_size_m=args.tag_size_m,
         close_m=args.close_feet * 0.3048,
     )

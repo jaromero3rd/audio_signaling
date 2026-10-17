@@ -41,7 +41,7 @@ def width_frac_for_distance(
     diag_px = math.hypot(fw, fh)
     focal_px = (diag_px / 2) / math.tan(math.radians(diag_fov_deg / 2))
     width_px = focal_px * tag_size_m / max(distance_m, 0.05)
-    return float(np.clip(width_px / fw, 0.12, 0.45))
+    return float(np.clip(width_px / fw, 0.22, 0.50))
 
 
 def yaw_forward(
@@ -63,8 +63,9 @@ def yaw_forward(
     invert_yaw: bool = False,
     invert_lr: bool = False,
     forward_gate: float = 0.18,
+    size_ratio: float | None = None,
 ) -> RcOut:
-    """Strafe/yaw to center, creep forward once roughly aligned.
+    """Strafe/yaw to center; keep creeping forward until the tag is large enough.
 
     Tello left_right: negative = left, positive = right.
     Tag left of center (err_x < 0) → slide left.
@@ -74,7 +75,7 @@ def yaw_forward(
     fh, fw = frame_shape[:2]
     err_x = (box.cx / fw) - 0.5
     err_y = (box.cy / fh) - 0.5
-    area = box.area_frac(frame_shape)
+    area = size_ratio if size_ratio is not None else box.area_frac(frame_shape)
     width = tag_width_frac(box, frame_shape)
     yaw = clip_cmd(kp_yaw * err_x, max_yaw)
     lr = clip_cmd(kp_lr * err_x + lr_trim, max_lr)
@@ -83,13 +84,14 @@ def yaw_forward(
     if invert_lr:
         lr = -lr
     up = clip_cmd(-kp_up * err_y, max_up) if kp_up and max_up else 0
-    if abs(err_x) > max(deadband, forward_gate):
-        return RcOut(yaw, 0, up, lr, err_x, area)
     if target_width is not None:
         gap = target_width - width
     else:
         gap = target_area - area
     if gap <= 0:
         return RcOut(yaw, 0, up, lr, err_x, area)
-    fwd = max(clip_cmd(kp_fwd * gap, max_fwd), 0)
+    # Still too far: creep in even if not perfectly centered (slow down when offset).
+    offset = abs(err_x)
+    scale = 1.0 if offset <= forward_gate else max(0.35, 1.0 - offset)
+    fwd = max(clip_cmd(kp_fwd * gap * scale, max_fwd), 8 if scale >= 0.35 else 0)
     return RcOut(yaw, fwd, up, lr, err_x, area)
