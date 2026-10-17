@@ -12,8 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
+import subprocess
 import threading
-import time
 from typing import Any
 
 SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -21,6 +21,52 @@ TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 DEVICE_NAME = "AgriDrone-UNOQ"
 RFCOMM_CHANNEL = 1
+
+
+def _run_bt_cmd(args: list[str], timeout: float = 8.0) -> str:
+    try:
+        r = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        out = (r.stdout or "") + (r.stderr or "")
+        return out.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        return f"(cmd failed: {exc})"
+
+
+def ensure_bluetooth_ready() -> None:
+    """Power on the UNO Q Bluetooth radio and make it discoverable.
+
+    Without this, Windows / bleak often never see AgriDrone-UNOQ.
+    """
+    print("[bt] ensuring Bluetooth adapter is ON + discoverable...", flush=True)
+
+    for cmd in (
+        ["bluetoothctl", "power", "on"],
+        ["bluetoothctl", "pairable", "on"],
+        ["bluetoothctl", "discoverable", "on"],
+        ["bluetoothctl", "agent", "on"],
+        ["bluetoothctl", "default-agent"],
+    ):
+        out = _run_bt_cmd(cmd)
+        if out:
+            print(f"[bt] {' '.join(cmd)} -> {out}", flush=True)
+
+    hci = _run_bt_cmd(["hciconfig", "hci0", "up"])
+    if hci and "failed" not in hci.lower():
+        print(f"[bt] hciconfig hci0 up -> {hci or 'ok'}", flush=True)
+    _run_bt_cmd(["hciconfig", "hci0", "piscan"])
+
+    show = _run_bt_cmd(["bluetoothctl", "show"])
+    if show:
+        for line in show.splitlines():
+            low = line.lower()
+            if any(k in low for k in ("powered", "discoverable", "pairable", "name", "alias")):
+                print(f"[bt] {line.strip()}", flush=True)
 
 
 class BtSensorStream:
@@ -35,9 +81,10 @@ class BtSensorStream:
         self.mode = "starting"
 
     def start(self) -> None:
+        ensure_bluetooth_ready()
         threading.Thread(target=self._ble_thread, name="bt-ble", daemon=True).start()
         threading.Thread(target=self._rfcomm_thread, name="bt-rfcomm", daemon=True).start()
-        self._ready.wait(timeout=10)
+        self._ready.wait(timeout=12)
 
     # --- BLE ---
     def _ble_thread(self) -> None:
@@ -77,6 +124,8 @@ class BtSensorStream:
         await server.start()
         self.mode = "ble+rfcomm"
         print(f"[bt-ble] advertising as {DEVICE_NAME}", flush=True)
+        # Re-assert discoverable after GATT server claims the adapter
+        ensure_bluetooth_ready()
         self._ready.set()
         while True:
             await asyncio.sleep(3600)
@@ -106,7 +155,6 @@ class BtSensorStream:
     def send_sample(self, payload: dict[str, Any]) -> bool:
         line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
         if len(line) > 180:
-            # Prefer keeping light + temp fields if we must trim
             small = {
                 "ok": payload.get("ok"),
                 "temp_c": payload.get("temp_c"),
@@ -162,4 +210,4 @@ class BtSensorStream:
 
     @property
     def ok(self) -> bool:
-        return self._ble_server is not None or True  # RFCOMM may still accept later
+        return self._ble_server is not None or True
