@@ -129,9 +129,17 @@ The first command only verifies routing. The second runs the mock and sends real
 
 ### Real Tello Operation
 
-Review the existing flight implementation and network setup before enabling hardware. Built-in Wi-Fi supplies internet; the Tello uses the USB dongle selected by `--tello-iface`.
+Default radios (no USB Wi-Fi dongle):
 
-The SDK entrypoint defaults to mock. The legacy voice/auto entrypoint does not: removing `--mock` there enables real Tello operation. These are prototype controls, not a flight-safety certification. Use an appropriate controlled area, charged battery, and operator supervision.
+1. Plug the phone into the Mac, Trust This Computer, turn **Personal Hotspot** on (USB + Wi-Fi).
+2. `python -m drone_interface.field_links --apply --tello-ssid TELLO-7`  
+   Built-in Wi-Fi joins the Tello; USB hotspot is moved above Wi-Fi so internet is not the drone.
+3. On the laptop: `python -m ground_station.sensor_recv` then `python demo.py --allow-real-flight …`
+4. On the UNO Q: copy `uno_q_field_station/python/config.example.json` → `config.json`, set `wifi.ssid` to the hotspot name, run the field-station app. It joins the phone Wi-Fi and POSTs to the Mac on `172.20.10.0/28`.
+
+Keep the phone near the flight area (board Wi-Fi range). USB stick `--dongle N` remains a fallback.
+
+The SDK entrypoint defaults to mock. These are prototype controls, not a flight-safety certification.
 
 ## For Details
 

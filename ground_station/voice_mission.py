@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Demo mission: Grok Voice on laptop Wi-Fi, Tello on a USB Wi-Fi dongle.
+"""Demo mission: Tello on Mac Wi-Fi; internet + Uno Q via USB phone hotspot.
 
 One process. No takeoff/land keys. Speak “survey the wheat”, or pass --auto
 to start as soon as Grok and the Tello stream are up.
@@ -92,7 +92,7 @@ def draw_hud(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Grok on laptop Wi-Fi; Tello on USB Wi-Fi dongle."
+        description="Tello on built-in Wi-Fi; internet on USB phone hotspot."
     )
     p.add_argument("--mock", action="store_true")
     p.add_argument("--controller", choices=("voice", "droid"), default="droid")
@@ -130,23 +130,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--dongle",
         type=int,
-        default=7,
-        help="USB stick number from config/dongles.json (default: 7 → TELLO-7)",
+        default=None,
+        help="optional USB Wi-Fi stick from config/dongles.json (default: Mac Wi-Fi → Tello)",
     )
     p.add_argument(
         "--ssid",
         default=None,
-        help="Tello SSID to join on the dongle (default: from dongle map, TELLO-7)",
+        help="Tello SSID on built-in Wi-Fi (default: TELLO_SSID or TELLO-7)",
     )
     p.add_argument(
         "--tello-iface",
         default=None,
-        help="USB dongle interface (e.g. wlx6c4cbce344fc). Default: from --dongle map",
+        help="Wi-Fi iface for the Tello (default: Mac en0). With --dongle, the USB stick.",
     )
     p.add_argument(
         "--no-wifi-join",
         action="store_true",
-        help="skip nmcli join; assume dongle already on 192.168.10.x",
+        help="skip joining the Tello SSID; assume 192.168.10.x is already up",
     )
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--family", choices=sorted(FAMILIES), default="36h11")
@@ -230,7 +230,10 @@ def main() -> int:
 
 
 def _run_mission(args, photon, cleanup) -> int:
-    print("Network: built-in Wi-Fi → internet/Grok+Factory; USB dongle 7 → TELLO-7.")
+    if args.dongle is not None:
+        print(f"Network: USB dongle {args.dongle} → Tello; keep phone USB for internet.")
+    else:
+        print("Network: Mac Wi-Fi → Tello; USB phone hotspot → internet + Uno Q.")
     gains = Gains(
         target_area=args.target_area,
         tag_size_m=args.tag_size_m,

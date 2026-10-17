@@ -31,15 +31,19 @@ Mic (sounddevice) -------- Linux  --POST /mic------->  ground laptop (raw f32le 
 
 If Wi-Fi drops: env rows go to SD; mic bytes append to local `data/mic_offline.f32le` until the link returns.
 
-## Setup
+## Setup (phone hotspot LAN)
 
-1. Copy `python/config.example.json` → `python/config.json`, set `ground_station_url`.
-2. App Lab → open this folder → Run on the UNO Q.
-3. Laptop:
+The Mac reaches the internet over **USB Personal Hotspot**. This board joins the **same hotspot over Wi-Fi**. Both land on `172.20.10.0/28`, so the board can POST to the Mac without sharing the Tello radio.
+
+1. Phone: enable Personal Hotspot, USB to the Mac, Wi-Fi for this board. Stay in range of the phone.
+2. Laptop: `python -m drone_interface.field_links --apply` then:
 
 ```bash
 python -m ground_station.sensor_recv --host 0.0.0.0 --port 8765
 ```
+
+3. Copy `python/config.example.json` → `python/config.json`. Set `wifi.ssid` (and password, or `PHONE_HOTSPOT_PASSWORD`). Leave `ground_station_url` as `"auto"` to scan `172.20.10.x:8765`.
+4. App Lab → open this folder → Run on the UNO Q.
 
 Farmer voice control (separate process on the same laptop):
 

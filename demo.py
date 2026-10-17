@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Demo entry: Factory Droid high-level control; local vision + RC; dongle 7 → TELLO-7.
+"""Demo entry: Factory Droid high-level control; local vision + RC.
+
+Default radios: Mac Wi-Fi → Tello; USB phone hotspot → internet + Uno Q.
+"""
 
 AprilTag/YOLO steer on the laptop. Droid SDK session issues start/land (etc.)
 via MCP tools — frames are NOT uploaded to Factory for detection.

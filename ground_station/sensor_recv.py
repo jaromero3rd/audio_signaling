@@ -185,6 +185,14 @@ def main(argv: list[str] | None = None) -> int:
     server = ThreadingHTTPServer((args.host, args.port), make_handler(store))
     print(f"telemetry  http://{args.host}:{args.port}/telemetry")
     print(f"mic stream http://{args.host}:{args.port}/mic  -> {args.mic_file}")
+    try:
+        from drone_interface.field_links import ground_station_url
+
+        tether = ground_station_url(args.port)
+        if tether:
+            print(f"Uno Q on phone hotspot should POST {tether}")
+    except Exception:
+        pass
     print("Grok Voice (farmer commands) is separate: ground_station/voice_grok.py")
     try:
         server.serve_forever()

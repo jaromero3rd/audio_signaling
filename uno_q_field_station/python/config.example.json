@@ -1,9 +1,12 @@
 {
-  "ground_station_url": "http://192.168.1.10:8765/telemetry",
+  "ground_station_url": "auto",
   "device_id": "unoq-field-01",
   "sample_relay_timeout_s": 2.0,
   "wifi": {
-    "ssid": "AgriDroneGround",
+    "ssid": "iPhone",
+    "password": "",
+    "join": true,
+    "note": "Join the phone Personal Hotspot (Wi-Fi). Mac is on the same LAN via USB (172.20.10.0/28). Password can also be PHONE_HOTSPOT_PASSWORD.",
     "min_rssi_dbm": -75,
     "check_interval_s": 2.0,
     "lost_grace_s": 8.0

@@ -19,7 +19,7 @@ RATE = 24000
 CHUNK = 1024
 
 INSTRUCTIONS = """
-You are AgriDrone, the voice operator running on this laptop. Built-in Wi-Fi is on the internet; the Ryze Tello is on a USB Wi-Fi dongle. The operator talks to you. You fly the mission by calling tools. Never tell them to press keyboard keys for takeoff, guidance, or land.
+You are AgriDrone, the voice operator running on this laptop. Built-in Wi-Fi is on the Tello; USB phone hotspot is internet (Factory/Grok) and the Uno Q LAN. The operator talks to you. You fly the mission by calling tools. Never tell them to press keyboard keys for takeoff, guidance, or land.
 
 When they ask to survey wheat, find the crop, start the drone, or go fly: call start_survey exactly once, then confirm in one short sentence. The drone takeoffs, spins 360 to find the target (climbs and spins again if needed, up to 60s), flies in close, takes a photo, turns around, does the same 360/climb scan for home AprilTag 12, flies in close, and lands there.
 
@@ -178,7 +178,7 @@ class GrokVoiceBridge:
                 print("Grok Voice live on laptop Wi-Fi")
                 await self._push_status(
                     "Ground station is live. Internet is on the laptop Wi-Fi. "
-                    "Tello is on the USB dongle. Greet the operator in one sentence "
+                    "Tello is on Mac Wi-Fi; internet is the phone USB hotspot. Greet the operator in one sentence "
                     "and wait for them to start the survey. Do not call start_survey yet."
                 )
                 await asyncio.gather(self._pump_mic(ws), self._recv(ws))

@@ -23,7 +23,16 @@ from urllib.parse import urlparse, urlunparse
 
 from autonomy import Mode, ReturnToWifiAgent
 from mic_transfer import MicTransfer
-from wifi_link import WifiSnapshot, post_telemetry, probe_wifi, wifi_strong_enough
+from wifi_link import (
+    WifiSnapshot,
+    join_phone_hotspot,
+    post_telemetry,
+    probe_wifi,
+    resolve_ground_url,
+    wifi_strong_enough,
+)
+
+_ground_url: str | None = None
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("FIELD_STATION_CONFIG", HERE / "config.json"))
@@ -42,6 +51,14 @@ def load_config() -> dict[str, Any]:
     path = CONFIG_PATH if CONFIG_PATH.is_file() else HERE / "config.example.json"
     with path.open(encoding="utf-8-sig") as f:
         return json.load(f)
+
+
+def ground_url(cfg: dict[str, Any]) -> str:
+    global _ground_url
+    if _ground_url:
+        return _ground_url
+    _ground_url = resolve_ground_url(cfg)
+    return _ground_url
 
 
 def mic_url_from_telemetry(telemetry_url: str) -> str:
@@ -123,7 +140,7 @@ def _flush_sd_to_ground(cfg: dict[str, Any]) -> int:
     header = lines[0] if lines[0].startswith("seq,") else None
     data_lines = lines[1:] if header else lines
     flushed = 0
-    url = cfg["ground_station_url"]
+    url = ground_url(cfg)
     timeout = float(cfg.get("sample_relay_timeout_s", 2.0))
     device_id = cfg.get("device_id", "unoq-field-01")
     for ln in data_lines:
@@ -186,7 +203,7 @@ def on_sensor_sample(
 
     if online:
         ok, err = post_telemetry(
-            cfg["ground_station_url"],
+            ground_url(cfg),
             payload,
             timeout_s=float(cfg.get("sample_relay_timeout_s", 2.0)),
         )
@@ -251,7 +268,7 @@ def autonomy_loop(agent: ReturnToWifiAgent, cfg: dict[str, Any], stop: threading
                     "command": decision.command,
                 }
                 post_telemetry(
-                    cfg["ground_station_url"],
+                    ground_url(cfg),
                     {
                         "device_id": cfg.get("device_id", "unoq-field-01"),
                         "source": "autonomy",
@@ -350,13 +367,24 @@ def _mock_sample_loop(stop: threading.Event) -> None:
 
 
 def main() -> None:
-    global _mic_xfer
+    global _mic_xfer, _ground_url
     cfg = load_config()
+    wifi_cfg = cfg.get("wifi", {})
+    if bool(wifi_cfg.get("join", True)) and not MOCK:
+        ssid = os.environ.get("PHONE_HOTSPOT_SSID") or str(wifi_cfg.get("ssid") or "")
+        password = os.environ.get("PHONE_HOTSPOT_PASSWORD") or str(wifi_cfg.get("password") or "")
+        if not ssid:
+            raise SystemExit("Set wifi.ssid in config.json or PHONE_HOTSPOT_SSID")
+        join_phone_hotspot(ssid, password)
+    if MOCK:
+        url = str(cfg.get("ground_station_url") or "")
+        _ground_url = url if url and url.lower() != "auto" else "http://127.0.0.1:8765/telemetry"
+    telemetry_url = ground_url(cfg)
     agent = make_agent(cfg)
     stop = threading.Event()
     audio_cfg = cfg.get("audio", {})
 
-    mic_url = audio_cfg.get("mic_url") or mic_url_from_telemetry(cfg["ground_station_url"])
+    mic_url = audio_cfg.get("mic_url") or mic_url_from_telemetry(telemetry_url)
     if bool(audio_cfg.get("transfer", True)) and not MOCK:
         _mic_xfer = MicTransfer(
             url=mic_url,
@@ -375,7 +403,7 @@ def main() -> None:
     t.start()
 
     print(
-        f"Field station up -> {cfg['ground_station_url']} "
+        f"Field station up -> {telemetry_url} "
         f"(mock={MOCK}, mic_transfer={_mic_xfer is not None})"
     )
     print("Note: Grok Voice / farmer commands run on the laptop, not this board.")

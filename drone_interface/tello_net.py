@@ -1,4 +1,8 @@
-"""Bind Tello UDP to a USB Wi-Fi dongle so the laptop's main Wi-Fi stays on the internet."""
+"""Bind Tello UDP to one radio so internet can stay on another path.
+
+macOS default: built-in Wi-Fi joins the Tello; USB phone hotspot is internet.
+Linux / ``--dongle``: USB Wi-Fi stick still supported.
+"""
 
 from __future__ import annotations
 
@@ -144,7 +148,8 @@ def resolve_tello_link(iface: str | None = None) -> TelloLink:
                 return link
         raise RuntimeError(
             f"Interface {iface!r} has no 192.168.10.x address. "
-            "Join the Tello Wi-Fi on the USB dongle, not the laptop's built-in Wi-Fi."
+            "On a Mac, join the Tello SSID on built-in Wi-Fi "
+            "(python -m drone_interface.field_links --apply)."
         )
     if len(links) == 1:
         return links[0]
@@ -152,8 +157,8 @@ def resolve_tello_link(iface: str | None = None) -> TelloLink:
         names = ", ".join(f"{l.iface}={l.local_ip}" for l in links)
         raise RuntimeError(f"Several Tello-subnet interfaces ({names}). Pass --tello-iface.")
     raise RuntimeError(
-        "No USB dongle on 192.168.10.0/24. Connect the dongle to the Tello SSID "
-        "(keep built-in Wi-Fi on the internet), then retry."
+        "No interface on 192.168.10.0/24. Join the Tello SSID on Mac Wi-Fi "
+        "(or pass --dongle for a USB stick), then retry."
     )
 
 
@@ -264,6 +269,21 @@ def _try_host_route(link: TelloLink) -> None:
             )
     except FileNotFoundError:
         pass
+
+
+def prepare_tello_link(
+    iface: str | None = None,
+    *,
+    ssid: str | None = None,
+    dongle: int | None = None,
+    connect: bool = True,
+) -> TelloLink:
+    """Bind Tello UDP. macOS uses built-in Wi-Fi unless ``dongle`` is set."""
+    if dongle is None and sys.platform == "darwin":
+        from drone_interface.field_links import prepare_tello_on_wifi
+
+        return prepare_tello_on_wifi(ssid=ssid, iface=iface, connect=connect)
+    return prepare_tello_dongle(iface, ssid=ssid, dongle=dongle, connect=connect)
 
 
 def prepare_tello_dongle(

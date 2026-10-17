@@ -44,9 +44,9 @@ class TelloDrone:
     ) -> None:
         from djitellopy import Tello
 
-        from drone_interface.tello_net import prepare_tello_dongle
+        from drone_interface.tello_net import prepare_tello_link
 
-        self._link = prepare_tello_dongle(
+        self._link = prepare_tello_link(
             iface, ssid=ssid, dongle=dongle, connect=connect_wifi
         )
         self._tello = Tello()

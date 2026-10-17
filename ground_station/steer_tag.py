@@ -111,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--tello-iface",
         default=None,
-        help="USB dongle interface (e.g. en8). Default: auto-detect 192.168.10.x",
+        help="Wi-Fi iface on 192.168.10.x (Mac en0 by default). USB dongle if you still use one.",
     )
     return p.parse_args()
 
