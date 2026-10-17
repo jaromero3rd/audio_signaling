@@ -81,7 +81,6 @@ async function worker(config: Config, store: Store) {
 try {
   if (mode === "doctor") {
     console.log(`Grok executable: ${config.bin}; model: ${config.model}`);
-    console.log(`xAI API key present: ${Boolean(config.key)}`);
     console.log(`Discord configuration complete: ${discordConfigured(config)}`);
     console.log(`Configured publish checks: ${config.checks.length}`);
     console.log(`Stored recent announcements: ${store.announcements().length}; Discord mode: READ ONLY`);

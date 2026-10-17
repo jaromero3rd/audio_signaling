@@ -1,189 +1,117 @@
-# Embedded Factory Droid mission controller
+# Embedded Factory Droid runtime
 
-Factory Droid makes bounded, high-level mission requests. The existing
-`SurveyMission` and camera loop still perform local steering and call the
-Tello/webcam adapter. This does not replace `djitellopy` with a different
-hardware protocol.
-
-## Start safely
-
-Install the root Python requirements and authenticate the installed `droid`
-CLI, or provide `FACTORY_API_KEY`. The SDK is pinned to `droid-sdk[mcp]==0.5.0`.
-
-From the repository root, check the real SDK wiring without opening a camera,
-running a model turn, sending a message, or connecting to a drone:
-
-```bash
-python -m ground_station.agent.session --check-sdk
-```
-
-Start the webcam mock, with cloud messaging explicitly disabled:
-
-```bash
-python -m ground_station.agent.session --target tag --target-tag 12 --home-tag 12 --no-voice --fake-analysis --no-photon
-```
-
-The SDK launcher adds `--mock` unless `--allow-real-flight` is explicit.
-It opens a webcam/display, not a headless simulator. A matching AprilTag
-lets the existing survey state machine follow its normal target path.
-Use `--camera` to choose the webcam, `--droid-model` for a Factory model ID,
-and `--droid-prompt` for the initial operator instruction. `--fake-analysis`
-is an explicit simulation, never a cloud-error fallback, and is forbidden on
-real hardware. Omit it and configure `XAI_API_KEY` for actual Grok image analysis.
-`--vision-model` or `XAI_VISION_MODEL` selects the image-understanding model.
-
-`python demo.py` now defaults to Droid and a webcam mock. Omit `--no-voice`
-to start Grok Voice alongside Droid: voice starts queue intent to the same
-SDK session, not directly to the mission. Emergency abort remains immediate.
-With voice enabled, Droid waits for a spoken request unless a custom prompt
-requests otherwise. `--no-voice` requests one survey on startup.
-`--auto` is rejected in Droid mode. The explicit `--controller voice` path
-preserves the legacy direct voice/auto demo without the analysis pipeline.
+One official SDK `Session` handles operator intent and native crop images.
+The host owns approval, deterministic local steering, capture paths, notification
+recipients, and every hardware call. See [setup](../../SETUP.md).
 
 ## Tools and authority
 
-| Tool | Host behavior |
-|------|---------------|
-| `get_mission_status()` | Reads logical mission state, mock/real mode, limits, stop latch, and pending approval. This is not independent physical telemetry. |
-| `issue_drone_command(drone_id, action)` | Accepts only the configured drone and `start_survey`, `capture_photo`, `continue_survey`, `land`, or `abort`. No raw RC, waypoints, paths, code, or arbitrary command arguments. |
-| `get_survey_context()` | Reads the current validated analysis, labeled local/Chalk features, and five field-scoped local history records. |
-| `send_photon_alert()` | Queues a host-formatted current-analysis alert to the fixed operator. Accepts no text, paths, or recipients; queued is not delivered. |
+Exactly four mission tools are registered under `agridrone`:
 
-`start_survey` requests the existing takeoff/target/photo/home/landing sequence.
-`capture_photo` queues an extra still for the camera thread; its return value
-does not claim that capture succeeded. `continue_survey` releases a live
-analysis hold only after the host has accepted the current analysis and no
-reimage/approval is pending. `land`/`abort` latch a stop and request
-landing; they do not claim that the drone has physically landed.
+| Tool | Contract |
+| --- | --- |
+| `get_mission_status()` | Reads host state, stop latch, capture and limits; required before non-emergency action |
+| `issue_drone_command(drone_id, action)` | Only start_survey, capture_photo, continue_survey, land, abort for the known drone |
+| `get_survey_context(assessment=None)` | Reads validated analysis, local/Chalk features, last five field-scoped SQLite records; image turns submit strict JSON here first |
+| `send_photon_alert()` | No arguments; requests a host-formatted current-analysis notification to the fixed operator |
 
-Only the host UI can approve real starts and extra photos. A pending request
-expires after 60 seconds. In the focused camera window:
+The optional assessment **string** contains only `health_score` and
+`analysis_summary`. The host supplies `field_id`. It accepts a finite score in
+`[0, 1]` and a nonblank summary up to 3,000 characters, with no extra fields.
+One accepted assessment cannot be replaced during a turn.
 
-- `y`: approve the displayed pending request. Starts also need a non-stale
-  frame according to the existing loop and at least 20% reported battery.
-- Space: latch a stop, revoke pending approval, and request landing.
-- `q`/Escape: stop and exit. Cleanup attempts landing if takeoff was requested,
-  even if its acknowledgement was lost.
+An image turn follows this protocol:
 
-A process permits one survey and two extra photo requests. Each SDK turn has
-a default 60-second timeout and 12 mission-tool calls; a controller permits
-16 turns. Queues are bounded. Failures, cancellation, or exhausted budgets
-latch a stop. Restarting the process requires a fresh SDK session and fresh
-real-flight approval. At photo capture the mission hovers in `await_analysis`.
-The host uploads JPEG/PNG bytes (at most 10 MiB) to xAI's `/v1/responses`,
-validates the structured score/summary, and feeds it to the same Droid session.
-The hold has a fixed 90-second deadline across all reimages. Invalid analysis,
-worker failure, or a Droid response without a decision fails closed; the
-deadline also requests landing independently of cloud completion.
+1. Host attaches JPEG/PNG/GIF/WebP bytes, nonempty and at most 5 MiB, through
+   `session.stream(..., images=[Image.from_bytes(...)])`.
+2. Droid reads status and submits its JSON to `get_survey_context`.
+3. Host validates it, obtains optional Chalk features, binds it to the still-live
+   capture, and records it. Stale, stopped and expired captures cannot be accepted.
+4. Droid reads the returned context, calls a decision tool and optionally the
+   unchanged alert tool, then finishes with the **same strict JSON**.
+5. Host validates final JSON before committing staged alert/decision requests.
+   Requests marked `staged_until_validated` are not executed or delivered.
+   Land/abort remain immediate, including before analysis validation.
 
-The pipeline writes observations and decisions to ignored `data/surveys.sqlite3`.
-`--field-id` scopes the latest five records. It does not resume flight on restart.
-`--chalk --chalk-branch <deployment>` invokes the existing named query after each
-analysis and validates its outputs; failures stop rather than silently falling
-back. Without `--chalk`, features explicitly identify local thresholds.
+No JSON-only narration is sufficient: a decision tool call is required.
+Malformed or changed final JSON cannot send alerts or release the hold.
+The host does not start a second vision session or a second decision turn.
+`--fake-analysis` explicitly uses a simulated fixture and normal decision turn.
+It never replaces failed real analysis.
 
-Real hardware requires **both** `--allow-real-flight` and local approval.
-`--tello-iface` preserves the existing USB Wi-Fi dongle configuration.
-Internet stays on the other interface. These are prototype controls, not
-flight-safety certification. Existing camera freshness detection, synchronous
-Tello calls, positioning, detection, and physical operating conditions still
-require operator review. No actual flight is needed to validate the SDK.
+## Gates and lifecycle
 
-## SDK session boundary
+`DroidWorker` serializes turns off the camera/RC thread. Startup queues an
+instruction, voice starts queue intent, and emergency stop directly latches
+the host driver. ElevenAgents is not another mission authority.
 
-[controller.py](controller.py) uses one `Session` with sequential
-`session.stream(...)` turns. It registers four authenticated loopback MCP
-tools using the official SDK. [worker.py](worker.py) owns that session on a
-separate thread so model latency does not block the camera/RC loop.
+Real starts/photos require local `y` approval with a 60-second TTL, including
+`--no-voice`. Starts also require camera/battery preflight. A queued request is
+not takeoff. One survey, two extra photos, 12 mission-tool calls per turn,
+16 turns, and a default 60-second model timeout remain in effect.
+The camera loop owns a fixed 90-second analysis deadline across all reimages.
+Failures, timeouts, cancellation, bad JSON, or no actionable decision stop and
+request landing. Space stops immediately; `q` stops and exits.
 
-The native tool allowlist is the four qualified AgriDrone tool IDs.
-Shell, filesystem, web, task delegation, and script tools are not authorized.
-CLI 0.244 always exposes read-only `ToolSearch` discovery; discovery does not
-authorize another tool. Startup verifies the effective allowlist and fails
-closed if another executable tool or foreign configured MCP server appears.
-SDK permission requests may approve only one call to one of our own tools.
+`continue_survey` requires current accepted analysis, no reimage/approval
+pending, and a live hold. The host validates that the requested decision
+actually releases the hold, stops, or queues a reimage/approval.
 
-The session runs in a temporary directory outside the repository. Known
-unrelated service credential variables, including Photon, Chalk, and xAI, are cleared in the CLI subprocess environment. Factory authentication
-and its required runtime environment remain available. This is a tool-policy
-boundary, **not an OS sandbox**; the CLI uses the operator's normal login and
-may retain its own transcripts under its normal settings.
+CLI Script/ToolSearch are available only to discover/invoke the four mission
+tools. The permission adapter accepts only our MCP actions. Shell/file access,
+foreign MCP servers and task delegation are denied. Startup verifies the
+effective tool inventory. This is a tool-policy boundary, **not an OS sandbox**.
 
-The host, not Droid, uploads captured image bytes to Grok. Validated analysis
-contains a host-selected `field_id`, finite `health_score` in `[0, 1]`, and
-bounded `analysis_summary`. Summaries, history, and filenames are untrusted data.
-`submit_analysis()` remains a validation-only ingress for external callers;
-the camera runtime uses [pipeline.py](pipeline.py) to bind results to captures.
+The CLI runs in a temporary directory. Photon, ElevenLabs (`ELEVENLABS_`),
+Chalk and other service credentials are suppressed in its environment.
+Factory authentication remains available. Native image bytes and validated
+observations go to Factory; speech goes to ElevenLabs; formatted alerts/audio
+go to Photon. Model summaries and history remain untrusted data.
 
-Chalk Volume storage and automatic session resumption remain separate. This runtime generates no scripts or unrestricted code.
-Existing [Chalk state helpers](store.py) remain optional and load lazily.
+## Features and persistence
+
+`SurveyPipeline` preserves the local healthy/watch/critical thresholds and
+optional Chalk named-query evaluation. Configured Chalk errors fail closed.
+Observations and decisions persist in ignored `data/surveys.sqlite3`.
+History is field-scoped. An incomplete decision stays pending in the audit
+log and does not resume a flight after restart.
+
+Chalk Volume helpers in `store.py` and the older `DroidSession` are separate,
+loaded lazily, and not part of the mission runtime. Their snapshots/log/cache
+do not replace the pipeline's local SQLite history.
 
 ## Photon system-to-user messaging
 
-[../photon.py](../photon.py) sends fixed host-generated notifications for
-acknowledged takeoff/landing, a saved photo, completion, abort, or controller
-failure. Droid may additionally request a current-analysis alert. The host
-formats only the validated field/score/summary with an uncertainty label;
-fake results are marked SIMULATED. Droid cannot choose a recipient or supply
-arbitrary message text. No photo, local path, or credentials are sent.
+Fixed host events cover acknowledged takeoff/landing, saved photo, completion,
+abort, and controller failure. Droid may also request a current-analysis alert.
+The host, not the model, selects delivery:
 
-Reuse the existing private echo-agent configuration with:
+- Critical (`health_score < 0.4` or critical Chalk flag): URGENT text and voice note.
+- Otherwise text only, unless the operator passes `--voice-notes`.
 
-```bash
-python -m ground_station.photon --env /absolute/path/to/private/photon.env --check
-python -m ground_station.agent.session --photon-env /absolute/path/to/private/photon.env
-```
+Voice notes use bounded, in-memory ElevenLabs Flash v2.5 MP3 synthesis.
+Text is attempted independently first. Missing/failed TTS is reported without
+private payloads. Photon uses multipart/related attachment uploads with
+content-hash keys, upload dedupe and bounded retries. Attachment-not-ready
+responses reuse the same message key and body.
 
-The first command is read-only. The second opens the webcam mock and **sends
-real iMessages labeled `MOCK`** when mission events occur. Use `--no-photon`
-to disable notifications. The older echo receiver does not need to be running
-for these outbound notifications.
-
-Required private values:
-
-- `PHOTON_API_KEY`, `PHOTON_PROJECT_ID`, `PHOTON_ASSIGNMENT_ID`
-- `PHOTON_AGENT_HANDLE` and `PHOTON_USER_HANDLE`
-- The existing echo config's `PHOTON_TEST_SENDER` is accepted as the user handle.
-- Optionally `PHOTON_SPACE_ID` to disambiguate multiple matching direct spaces.
-
-For local default configuration, put only
-`PHOTON_ENV_FILE=/absolute/path/to/private/photon.env` in ignored
-`.env.droid.local`. The private file is parsed without exporting its credentials
-to the model subprocess. Root `.env` and process environment are also supported;
-an explicit Photon environment file takes precedence.
-
-Readiness checks the active project/assignment and requires an existing direct
-space with exactly the configured human and agent. It does not create users or
-spaces, send a test, or claim outbound delivery has been proven. Shared iMessage
-spaces use ordinary messages, never unsupported `parentMessageId` replies.
-
-Notifications run off the flight loop, deduplicate each event within the run,
-and retry transient errors at most three times with the same idempotency key.
-Accepted does not mean delivered. This bounded queue is best effort, not a
-durable outbox; process exit may leave delivery pending.
-
-Only with explicit permission to send a real setup confirmation:
-
-```bash
-python -m ground_station.photon --env /absolute/path/to/private/photon.env --send-test
-```
-
-This sends one fixed test and polls its delivery status. It does not operate
-hardware or grant flight authority. Incoming Photon mission commands are not
-implemented, and the echo agent remains a separate service.
+**Photon cannot place calls.** An urgent voice note is an ordinary iMessage
+audio attachment, not telephony and not a guaranteed native voice-message UI.
+The queue is best effort, not durable. Accepted never means delivered.
+Photo upload is supported at the client boundary; automatic photo sending and
+incoming Photon mission commands are not implemented.
 
 ## Verification
 
 ```bash
 python -m unittest discover -s tests -v
-python tests/live_droid_pipeline.py
 ```
 
-Offline tests use fake sessions, in-memory HTTP responses and fake hardware.
-They cover approval/stop gates, budgets, schema validation, session lifecycle,
-entrypoint defaults, cleanup, Photon routing/idempotency and credential omission.
-They also exercise the actual worker, mission, persistent controller, reimage
-mailbox, history, Responses image wire contract, hold deadline, and analysis
-alert routing. The second command is opt-in: it uses the authenticated real
-Factory SDK/model with simulated vision and Photon HTTP responses.
-Neither command connects to a drone, opens a camera, or sends a real message.
+This uses fake SDK sessions, fake ElevenAgents/audio, in-memory TTS/Photon HTTP
+responses and fake hardware. No live credentials are needed.
+
+`python tests/live_droid_pipeline.py` is a separately authorized Factory smoke
+test using a generated real PNG in the persistent session. Photon and
+ElevenLabs remain fake; it opens no devices and sends no real messages.
+`python -m ground_station.agent.session --check-sdk` is a live SDK/tool-inventory
+check without inference or hardware, not an offline test.

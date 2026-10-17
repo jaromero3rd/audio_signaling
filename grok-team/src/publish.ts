@@ -15,7 +15,6 @@ export function botBranch(branch: string) {
 export async function command(argv: string[], cwd = REPO, config?: Config) {
   const env = config ? childEnvironment(config) : undefined;
   if (env) {
-    delete env.XAI_API_KEY;
     if (process.env.SSH_AUTH_SOCK) env.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
   }
   try {

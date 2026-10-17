@@ -29,6 +29,7 @@ class RuntimeTests(unittest.TestCase):
         for flags in ([], ["--mock", "--auto"]):
             with patch.object(sys, "argv", ["demo", "--controller", "droid", "--no-photon", *flags]), \
                  patch.object(voice_mission, "load_dotenv"), \
+                 patch.dict("os.environ", {"ELEVENLABS_API_KEY": "", "ELEVENLABS_AGENT_ID": ""}), \
                  patch.object(voice_mission, "MockDrone") as mock, \
                  patch.object(voice_mission, "TelloDrone") as tello:
                 self.assertEqual(voice_mission.main(), 1)
@@ -84,6 +85,42 @@ class RuntimeTests(unittest.TestCase):
             drone.land.assert_called_once()
             drone.close.assert_called_once()
             tello.assert_not_called()
+
+    def test_default_voice_uses_elevenagents_with_droid_gateway(self):
+        with ExitStack() as stack:
+            drone, tello, worker, factory = self.environment(stack)
+            sys.argv.remove("--no-voice")
+            stack.enter_context(patch.dict("os.environ", {
+                "ELEVENLABS_API_KEY": "test-only", "ELEVENLABS_AGENT_ID": "test-agent",
+            }))
+            bridge = MagicMock()
+            bridge.ready.wait.return_value = True
+            voice_factory = stack.enter_context(patch(
+                "ground_station.voice_eleven.start_voice_thread", return_value=bridge))
+            self.assertEqual(voice_mission.main(), 0)
+            gateway = voice_factory.call_args.args[0]
+            self.assertTrue(gateway.controlled_by_droid)
+            self.assertIs(gateway.worker, worker)
+            bridge.close.assert_called_once()
+            tello.assert_not_called()
+
+    def test_no_voice_on_real_adapter_still_requires_local_approval(self):
+        with ExitStack() as stack:
+            drone, tello, worker, factory = self.environment(stack)
+            sys.argv.remove("--mock")
+            sys.argv.remove("--fake-analysis")
+            sys.argv.extend(["--allow-real-flight", "--crop-analysis"])
+            real_fake = tello.return_value
+            real_fake.get_frame.return_value = None
+            real_fake.battery.return_value = 90
+            requests = []
+            worker.start.side_effect = lambda _: requests.append(
+                factory.call_args.args[0].issue("drone-1", "start_survey"))
+            self.assertEqual(voice_mission.main(), 0)
+            self.assertEqual(requests[0]["reason"], "local_approval_required")
+            self.assertFalse(factory.call_args.args[0].auto_approve)
+            real_fake.takeoff.assert_not_called()
+            real_fake.close.assert_called_once()
 
 
 if __name__ == "__main__":

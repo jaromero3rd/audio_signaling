@@ -1,6 +1,6 @@
 """Capture mic PCM (same sounddevice setup as recv.py) and POST chunks to ground.
 
-Farmer voice commands / Grok Voice run on the laptop (ground_station/voice_grok.py),
+Farmer voice commands / ElevenAgents run on the laptop (ground_station/voice_eleven.py),
 not on the UNO Q. This module only records and relays audio bytes.
 """
 

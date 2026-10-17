@@ -17,7 +17,7 @@ import httpx
 import numpy as np
 from pydantic import ValidationError
 
-from ground_station.agent.analysis import AnalysisError, FakeImageAnalyzer, GrokImageAnalyzer, SurveyAnalysis
+from ground_station.agent.analysis import AnalysisError, FakeImageAnalyzer, DroidImageAnalyzer, SurveyAnalysis
 from ground_station.agent.controller import DroidController, TOOL_IDS
 from ground_station.agent.driver import MissionDriver
 from ground_station.agent.pipeline import SurveyPipeline
@@ -108,54 +108,29 @@ class DecisionSession:
 
 
 class VisionTests(unittest.IsolatedAsyncioTestCase):
-    async def test_responses_sends_image_and_strict_schema_not_a_path(self):
-        requests = []
-
-        def transport(request):
-            requests.append(request)
-            return httpx.Response(200, json={
-                "status": "completed", "output": [{"type": "message", "content": [
-                    {"type": "output_text", "text": json.dumps({
-                        "health_score": 0.8, "analysis_summary": "Visible green canopy; limited evidence.",
-                    })}]}],
-            })
-
-        analyzer = GrokImageAnalyzer("test-only-key", transport=httpx.MockTransport(transport))
-        try:
-            with tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "capture.jpg"
-                path.write_bytes(b"\xff\xd8\xfftest-image")
-                result = await analyzer.analyze(path, "field-1")
-                self.assertEqual(result.field_id, "field-1")
-                self.assertEqual(result.health_score, 0.8)
-                request = requests[0]
-                body = json.loads(request.content)
-                self.assertEqual(str(request.url), "https://api.x.ai/v1/responses")
-                self.assertTrue(body["text"]["format"]["strict"])
-                self.assertFalse(body["store"])
-                self.assertIn("data:image/jpeg;base64,", body["input"][1]["content"][1]["image_url"])
-                self.assertNotIn(directory, request.content.decode())
-        finally:
-            await analyzer.close()
+    async def test_native_image_and_strict_schema_not_a_path(self):
+        analyzer = DroidImageAnalyzer()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capture.jpg"
+            path.write_bytes(b"\xff\xd8\xfftest-image")
+            image = analyzer.image(path)
+            self.assertEqual(image.source.media_type, "image/jpeg")
+            self.assertNotIn(directory, repr(image))
+            result = analyzer.parse('{"health_score":0.8,"analysis_summary":"Limited evidence."}', "field-1")
+            self.assertEqual(result.field_id, "field-1")
+            self.assertEqual(result.health_score, 0.8)
 
     async def test_invalid_or_incomplete_analysis_never_becomes_an_observation(self):
-        for status, score in [("incomplete", 0.8), ("completed", float("nan")), ("completed", 2.0)]:
-            analyzer = GrokImageAnalyzer("test-only-key", transport=httpx.MockTransport(
-                lambda request: httpx.Response(200, content=json.dumps({
-                    "status": status, "output": [{"type": "message", "content": [
-                        {"type": "output_text", "text": json.dumps({
-                            "health_score": score, "analysis_summary": "observed",
-                        })}]}],
-                }).encode(), headers={"content-type": "application/json"})
-            ))
-            try:
-                with tempfile.TemporaryDirectory() as directory:
-                    path = Path(directory) / "capture.png"
-                    path.write_bytes(b"\x89PNG\r\n\x1a\ntest")
-                    with self.assertRaises(AnalysisError):
-                        await analyzer.analyze(path, "field-1")
-            finally:
-                await analyzer.close()
+        analyzer = DroidImageAnalyzer()
+        for text in ('not JSON', '{}', '```json\n{}\n```', '[]',
+                     '{"health_score":NaN,"analysis_summary":"x"}',
+                     '{"health_score":true,"analysis_summary":"x"}',
+                     '{"health_score":2.0,"analysis_summary":"x"}',
+                     '{"health_score":0.8,"analysis_summary":" "}',
+                     '{"health_score":0.1,"health_score":0.8,"analysis_summary":"x"}',
+                     '{"health_score":0.8,"analysis_summary":"x","extra":"no"}'):
+            with self.subTest(text=text), self.assertRaises(AnalysisError):
+                analyzer.parse(text, "field-1")
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -244,6 +219,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_reimage_waits_for_approval_and_timeout_revokes_it(self):
         self.driver.mock = False
+        self.driver.auto_approve = False
         DecisionSession.decisions = ["capture_photo"]
         capture_phase(self.mission)
         async with DroidController(self.driver, pipeline=self.pipeline, session_factory=DecisionSession) as controller:
