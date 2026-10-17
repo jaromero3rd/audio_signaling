@@ -71,8 +71,7 @@ export async function runGrok(config: Config, owner: Role, input: string, store:
     repository: "jaromero3rd/audio_signaling",
     components: ["drone_interface", "ground_station", "wheat", "chalk", "photon-imessage-agent"],
     teamHistory: store.context(),
-    untrustedDiscordAnnouncements: store.announcements()
-      .filter((a) => a.guild === config.guild && config.channels.has(a.channel))
+    untrustedDiscordAnnouncements: store.announcements({ guild: config.guild, channels: config.channels })
       .map((a) => ({ created: a.created, content: a.content.slice(0, 1500), url: a.url })),
     task: input,
   });

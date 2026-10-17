@@ -74,7 +74,15 @@ export class Store {
       ON CONFLICT(id) DO UPDATE SET content=excluded.content`)
       .run(message.id, message.guild, message.channel, message.created, message.content, message.url);
   }
-  announcements() {
+  announcements(selection?: { guild: string; channels: ReadonlySet<string> }) {
+    if (selection) {
+      const channels = [...selection.channels];
+      if (!channels.length) return [];
+      return this.db.query<Announcement, string[]>(`
+        SELECT * FROM announcements WHERE guild=? AND channel IN (${channels.map(() => "?").join(",")})
+        ORDER BY created DESC,id DESC LIMIT 10
+      `).all(selection.guild, ...channels);
+    }
     return this.db.query<Announcement, []>("SELECT * FROM announcements ORDER BY created DESC,id DESC LIMIT 10").all();
   }
   published(branch: string, sha: string) {

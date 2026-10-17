@@ -59,9 +59,11 @@ export async function createWorkspace(config: Config, owner: Role, slug: string)
   return { path, branch };
 }
 
-export async function verifyRemote(config: Config) {
-  const url = await git(["remote", "get-url", "--push", "origin"], REPO, config);
-  if (!/^(?:https:\/\/github\.com\/|git@github\.com:)jaromero3rd\/audio_signaling(?:\.git)?$/.test(url))
+export async function verifyRemote(config: Config, cwd = REPO) {
+  const urls = (await git(["remote", "get-url", "--push", "--all", "origin"], cwd, config))
+    .split("\n").filter(Boolean);
+  if (!urls.length || urls.some((url) =>
+    !/^(?:https:\/\/github\.com\/|git@github\.com:)jaromero3rd\/audio_signaling(?:\.git)?$/.test(url)))
     throw new TeamError(`Publisher only targets ${REPOSITORY}; origin does not match.`);
 }
 
@@ -93,24 +95,25 @@ export async function publish(config: Config, branch: string, expected: string, 
     if (await io.git(["rev-parse", "HEAD"], workspace.path, config) !== expected)
       throw new TeamError("Publishing blocked: commit changed while checks ran.");
   };
-  await io.verifyRemote(config);
+  await io.verifyRemote(config, workspace.path);
   await clean();
   await io.git(["fetch", "origin", "main"], REPO, config);
   await io.git(["merge-base", "--is-ancestor", "origin/main", expected], workspace.path, config);
   const range = `origin/main..${expected}`;
   if (!await io.git(["rev-list", "--count", range], workspace.path, config).then((n) => Number(n) > 0))
     throw new TeamError("No new bot commits to publish.");
-  // Inspect every new commit, including files later deleted from the final tree.
-  const pathText = await io.git(["log", "--name-only", "-z", "--format=", range], workspace.path, config);
-  const patch = await io.git(["log", "-p", "--format=", range], workspace.path, config);
+  // Inspect every new commit, including merge diffs against each parent and
+  // files later deleted from the final tree. Git otherwise omits merge diffs.
+  const pathText = await io.git(["log", "--diff-merges=separate", "--name-only", "-z", "--format=", range], workspace.path, config);
+  const patch = await io.git(["log", "--diff-merges=separate", "-p", "--format=", range], workspace.path, config);
   inspectChanges(pathText.split("\0").map((s) => s.trim()).filter(Boolean), patch, config.secrets);
-  const numstat = await io.git(["log", "--numstat", "--format=", range], workspace.path, config);
+  const numstat = await io.git(["log", "--diff-merges=separate", "--numstat", "--format=", range], workspace.path, config);
   if (numstat.split("\n").some((line) => line.startsWith("-\t-\t")))
     throw new TeamError("Binary changes require manual review; auto-publishing is blocked.");
   await io.git(["diff", "--check", `origin/main...${expected}`], workspace.path, config);
   for (const argv of config.checks) await io.command(argv, workspace.path, config);
   await clean();
-  await io.verifyRemote(config);
+  await io.verifyRemote(config, workspace.path);
   // The destination is explicit; never use configured upstream/push defaults.
   // No force, merge, staging, commit, clean, reset, or default-branch push.
   await io.git(["push", "origin", `${expected}:refs/heads/${branch}`], workspace.path, config);
