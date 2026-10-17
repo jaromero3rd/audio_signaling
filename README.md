@@ -10,7 +10,7 @@ AgriDrone is a HackHarvard 2026 prototype for voice-directed Tello field surveys
 - **Flight layer:** The local mission state machine handles takeoff, target approach, photo capture, home search, and landing through Tello or a webcam mock.
 - **SDK controller:** One persistent Factory Droid session receives validated image analysis and makes tool-driven decisions while local flight control stays independent.
 - **System notifications:** The host sends mission-status and Droid-requested analysis alerts through a verified private Photon assignment.
-- **Features and history:** Local SQLite survey/decision history is persistent. `--chalk` evaluates fresh analyses through the deployed Chalk named query. Daytona remains standalone; this runtime generates no scripts.
+- **Features and history:** Local SQLite survey/decision history is persistent. `--chalk` evaluates fresh analyses through the deployed Chalk named query.
 
 ## What's Implemented & Working
 
@@ -21,7 +21,6 @@ AgriDrone is a HackHarvard 2026 prototype for voice-directed Tello field surveys
 | **Wheat/AprilTag detection** | Live `.pt` detector or AprilTag | Supply weights or use a printed tag |
 | **Photo capture & logging** | Saves local stills and paths | View `captures/` |
 | **Chalk feature evaluation** | Optional runtime query and cloud regression runner | Enable `--chalk`; run labeled boundary cases separately |
-| **Daytona cloud sandbox** | Standalone SDK wrapper | Separate cloud smoke test |
 | **Mission state storage** | Standalone Chalk Volume helpers | Not called by the mission |
 | **Embedded Droid session** | Persistent SDK session and restricted tools | Mock-first launcher below |
 | **Photon system notifications** | Host-owned mission hooks | Configure the existing private iMessage assignment |
@@ -76,9 +75,6 @@ Realtime speech connects natural requests to `start_survey`, `get_mission_status
 
 ### Chalk
 Online resolvers compute `healthy` / `watch` / `critical`, severity, and recommended action from Grok's health score when `--chalk` is enabled. Without it, clearly labeled local thresholds provide context. Chalk does not inspect the image.
-
-### Daytona
-The real SDK wrapper creates a sandbox, executes code, and supports cleanup. Future generated analysis scripts could run there instead of on the host. The current Droid runtime exposes no code-execution tool and does not call Daytona.
 
 ### Photon
 The host sends status notifications and validated analysis text to the configured human through an existing direct iMessage space. Droid can request an alert but cannot choose recipients or arbitrary text. This mission runtime does not send image attachments or accept incoming mission commands.
