@@ -104,8 +104,7 @@ closed if another executable tool or foreign configured MCP server appears.
 SDK permission requests may approve only one call to one of our own tools.
 
 The session runs in a temporary directory outside the repository. Known
-unrelated service credential variables, including Photon, Chalk, xAI and
-Daytona, are cleared in the CLI subprocess environment. Factory authentication
+unrelated service credential variables, including Photon, Chalk, and xAI, are cleared in the CLI subprocess environment. Factory authentication
 and its required runtime environment remain available. This is a tool-policy
 boundary, **not an OS sandbox**; the CLI uses the operator's normal login and
 may retain its own transcripts under its normal settings.
@@ -116,8 +115,7 @@ bounded `analysis_summary`. Summaries, history, and filenames are untrusted data
 `submit_analysis()` remains a validation-only ingress for external callers;
 the camera runtime uses [pipeline.py](pipeline.py) to bind results to captures.
 
-Daytona execution, Chalk Volume storage, and automatic session resumption
-remain separate. This runtime generates no scripts or unrestricted code.
+Chalk Volume storage and automatic session resumption remain separate. This runtime generates no scripts or unrestricted code.
 Existing [Chalk state helpers](store.py) remain optional and load lazily.
 
 ## Photon system-to-user messaging

@@ -15,12 +15,11 @@ This table shows what code exists and what's wired together:
 | [Grok Voice](#grok-voice) | Realtime audio session start, status, abort tools | Starts route to persistent Droid; stops bypass cloud |
 | [Chalk feature evaluation](#chalk-feature-evaluation) | Resolvers and validated named query | Invoked per analysis with `--chalk`; local thresholds otherwise |
 | [Chalk mission state](#chalk-volume-backed-mission-state) | Volume-backed snapshots, decision log, latest-survey cache | Storage helpers exist but not called by mission |
-| [Daytona sandbox](#daytona-sandbox-execution) | SDK wrapper and mission/runtime coordination | Standalone smoke test; no mission or Droid integration yet |
 | [Grok team coordination](#grok-team-coordination) | CLI queue/history, read-only bot-branch publisher | Independent developer coordination service; not mission-critical |
 | [Droid and Photon](#how-droid-is-used-at-runtime) | Persistent SDK, Grok image analysis, history, restricted tools and alerts | Connected photo-analysis-decision loop; no incoming Photon commands |
 | [Audio signaling](#standalone-audio-signaling) | Speaker-to-microphone ggwave text sender/receiver | Independent utilities; not connected to survey mission |
 
-**Key insight**: The default runtime connects image analysis to persistent Droid decisions and controlled actions/alerts. Daytona and Chalk Volume remain separate; visual health estimates are not verified diagnoses.
+**Key insight**: The default runtime connects image analysis to persistent Droid decisions and controlled actions/alerts. Chalk Volume remains separate; visual health estimates are not verified diagnoses.
 
 ## Current Runtime Flow
 
@@ -55,7 +54,6 @@ The host sends image bytes to xAI, then validated analysis and features to Droid
 
 It does **not**:
 - Save mission state to Chalk
-- Run Daytona scripts
 
 ## Ground-station mission and drone interface
 
@@ -254,38 +252,6 @@ Volume is created on first use if it doesn't exist. Environment variable `CHALK_
 
 The current mission does **not** call these helpers. Storage helpers exist, but the local flight loop does not persist state to Volume.
 
-## Daytona Sandbox Execution
-
-**Source**: [ground_station/sandbox/daytona_runner.py](ground_station/sandbox/daytona_runner.py).
-
-### Overview
-
-`DroidSandbox` is an actual Daytona SDK wrapper, not a mock. Constructing an instance provisions a real ephemeral cloud sandbox project with a default 15-minute idle auto-stop interval. Reusing the same object allows successive operations in the same sandbox.
-
-### Supported Operations
-
-- **Python execution**: `run_code(script, timeout)` → returns exit code, stdout, stderr.
-- **Shell execution**: `exec(command)` → returns exit code, stdout, stderr.
-
-### Prerequisites
-
-- `DAYTONA_API_KEY`: API credentials.
-- `DAYTONA_API_URL`: Endpoint (default `https://app.daytona.io/api`).
-- `DAYTONA_TARGET`: Optional region override.
-
-### Smoke Test
-
-[ground_station/sandbox/daytona_runner.py](ground_station/sandbox/daytona_runner.py) main:
-- Creates a sandbox
-- Runs a Python version check
-- Deletes the sandbox
-
-**Running this provisions real cloud resources**, subject to account limits and usage costs.
-
-### Integration Status
-
-No mission or embedded Droid runtime currently calls this wrapper. It is intended for isolated execution of Droid-generated analysis and planning scripts. Results are returned to the host for validation before local action or alert.
-
 ## Grok Team Coordination
 
 **Source and operating guide**: [grok-team/README.md](grok-team/README.md).
@@ -332,10 +298,12 @@ One official `droid-sdk` session handles initial instructions, voice starts and 
 
 `python -m ground_station.agent.session --check-sdk` verifies the effective tool boundary without opening hardware or running inference. `python -m ground_station.photon --check` checks the configured assignment and routing without sending a message.
 
+Droid and Chalk must not perform per-frame steering. AprilTag alignment, movement commands, landing, and aborts remain inside the deterministic local control loop.
+
 ### Current Gaps
 
 - Live Grok image assessments are not validated agronomic diagnoses; the authenticated SDK smoke test simulates vision and Photon.
-- Chalk querying requires `--chalk` and a deployed named query. Chalk Volume storage, Daytona execution, and automatic flight resumption remain separate.
+- Chalk querying requires `--chalk` and a deployed named query. Chalk Volume storage and automatic flight resumption remain separate.
 - No Photon image attachments or incoming mission commands. Notification delivery is best effort, not a durable outbox.
 - The PRD describes demo criteria and acceptance targets, not a completed demo checklist.
 
@@ -354,7 +322,7 @@ They are **independent speaker/microphone experiments**, not a radio link, photo
 
 All commands run from the repository root. Create a virtual environment and install [requirements.txt](requirements.txt). For ONNX inference, dataset tools, or training, also install [wheat_detection/requirements.txt](wheat_detection/requirements.txt).
 
-Root requirements do not pin Chalk or Daytona SDK versions; verify compatibility in your environment.
+Root requirements do not pin the Chalk SDK version; verify compatibility in your environment.
 
 ### Component Prerequisites
 
@@ -363,7 +331,6 @@ Root requirements do not pin Chalk or Daytona SDK versions; verify compatibility
 | Webcam/tag demo without voice | Webcam access (OpenCV display); no cloud credentials |
 | Grok Voice | `XAI_API_KEY`, audio-device access, internet |
 | Chalk helpers | `CHALK_CLIENT_ID`, `CHALK_CLIENT_SECRET`, real `CHALK_ENVIRONMENT` ID, `CHALK_STATE_VOLUME` name |
-| Daytona | `DAYTONA_API_KEY`, API URL, target environment |
 | Grok team CLI | Local Grok CLI installed; see [grok-team/README.md](grok-team/README.md) |
 | Factory Droid controller | Authenticated `droid` CLI or `FACTORY_API_KEY`; pinned `droid-sdk[mcp]`; xAI key for vision unless explicit mock fixture |
 | Photon system notifications | Private Beta assignment and existing direct space; see the [runtime guide](ground_station/agent/README.md) |
@@ -427,7 +394,6 @@ python demo.py --allow-real-flight --target tag --target-tag 12 --home-tag 12 --
 | `python wheat_detection/predict.py path/to/field.png --device cpu` | Ultralytics inference | `.pt` checkpoint |
 | `python -m ground_station.chalk_eval` | Authenticated cloud Chalk queries | Chalk credentials, deployed features |
 | `python -m ground_station.chalk_quality` | Named-query smoke call on `schedtest` | Chalk credentials |
-| `python -m ground_station.sandbox.daytona_runner` | Creates, exercises, deletes Daytona sandbox | Daytona credentials (provisioning real resources) |
 
 The SDK launcher runs the connected runtime; the headless test proves authenticated SDK decisions with simulated providers. Other commands exercise individual components. Cloud helper smoke calls are not prerequisites for the legacy local webcam demo.
 
@@ -451,7 +417,7 @@ audio_signaling/
 │   ├── chalk_client.py                  # Feature query helper
 │   ├── chalk_quality.py                 # Named-query smoke test
 │   ├── chalk_eval.py                    # Labeled eval
-│   ├── agent/
+│   └── agent/
 │   │   ├── session.py                   # Mock-first SDK entrypoint
 │   │   ├── controller.py                # Persistent session and restricted MCP tools
 │   │   ├── driver.py                    # Host approval and bounded mission commands
@@ -459,8 +425,6 @@ audio_signaling/
 │   │   ├── README.md                    # Runtime and Photon setup guide
 │   │   ├── store.py                     # Chalk Volume state helpers
 │   │   └── NOTES.md                     # Storage investigation caveats
-│   └── sandbox/
-│       └── daytona_runner.py            # Daytona SDK wrapper
 ├── chalk/
 │   ├── features.py                      # Survey schema and resolvers
 │   ├── named_queries.py                 # Query, chart, heartbeat definitions
