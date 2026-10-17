@@ -346,6 +346,7 @@ def _run_mission(args, photon, cleanup) -> int:
     if not args.no_voice:
         if not os.environ.get("XAI_API_KEY"):
             print("Missing XAI_API_KEY. Put it in .env or export it.")
+            droid.close()
             return 1
         from ground_station.voice_grok import start_voice_thread
 
@@ -427,6 +428,18 @@ def _run_mission(args, photon, cleanup) -> int:
                     photon.notify("photo")
                 if droid is not None and args.want_crop:
                     droid.submit_photo(path)
+                elif path and os.environ.get("XAI_API_KEY"):
+                    # Fire-and-forget Grok still (origin/main) when not in crop-hold pipeline.
+                    from ground_station.grok_image import analyze_photo_with_grok_async
+
+                    def on_grok_complete(analysis):
+                        print(
+                            f"photo analysis: health={analysis.get('health_score'):.2f} "
+                            f"summary={str(analysis.get('analysis_summary', ''))[:50]}..."
+                        )
+                        mission.last_analysis = analysis
+
+                    analyze_photo_with_grok_async(path, on_grok_complete)
 
             if photon is not None:
                 if droid is not None and droid.failed.is_set():
