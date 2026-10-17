@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Demo mission: Grok Voice on this laptop + Tello Wi-Fi + USB tether internet.
+"""Demo mission: Grok Voice on laptop Wi-Fi, Tello on a USB Wi-Fi dongle.
 
 One process. No takeoff/land keys. Speak “survey the wheat”, or pass --auto
 to start as soon as Grok and the Tello stream are up.
@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
 from drone_interface.tello_client import MockDrone, TelloDrone
 from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
-from ground_station.mission import FRAME_STALE_S, Gains, SurveyMission
+from ground_station.mission import CLOSE_FEET_DEFAULT, FRAME_STALE_S, Gains, TAG_SIZE_M_DEFAULT, SurveyMission
 from ground_station.vision import DEFAULT_WEIGHTS, Box
 
 GROK_READY_S = 20.0
@@ -36,12 +36,13 @@ def draw_hud(
     mission: SurveyMission,
     box: Box | None,
     err_x: float | None,
-    area: float | None,
     yaw: int,
     fwd: int,
     up: int,
     stale: bool,
     battery: int | None,
+    tag_w: float | None = None,
+    need_w: float | None = None,
 ) -> np.ndarray:
     vis = frame.copy()
     h, w = vis.shape[:2]
@@ -65,7 +66,9 @@ def draw_hud(
         f"target={snap['target']}  home=tag-{snap['home_tag']}",
         f"yaw={yaw:+d} fwd={fwd:+d} up={up:+d}",
         f"err_x={err_x:+.2f}" if err_x is not None else "no box",
-        f"area={area:.3f}" if area is not None else "",
+        f"tag_w={tag_w:.2f} need={need_w:.2f} (~2ft)"
+        if tag_w is not None and need_w is not None
+        else "",
         f"bat={battery}%" if battery is not None else "",
         "STALE" if stale else "",
         "say survey the wheat  |  space abort  |  q quit",
@@ -86,9 +89,14 @@ def draw_hud(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Grok-on-laptop Tello survey (USB tether + Tello Wi-Fi)."
+        description="Grok on laptop Wi-Fi; Tello on USB Wi-Fi dongle."
     )
     p.add_argument("--mock", action="store_true")
+    p.add_argument(
+        "--tello-iface",
+        default=None,
+        help="USB dongle interface (e.g. en8). Default: auto-detect 192.168.10.x",
+    )
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--family", choices=sorted(FAMILIES), default="36h11")
     p.add_argument("--home-tag", type=int, default=12)
@@ -103,6 +111,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-voice", action="store_true", help="skip Grok (requires --auto)")
     p.add_argument("--hz", type=float, default=12.0)
     p.add_argument("--target-area", type=float, default=0.12)
+    p.add_argument(
+        "--close-feet",
+        type=float,
+        default=CLOSE_FEET_DEFAULT,
+        help="do not mark the target done until about this close (AprilTag width in frame)",
+    )
+    p.add_argument(
+        "--tag-size-m",
+        type=float,
+        default=TAG_SIZE_M_DEFAULT,
+        help="printed tag width in meters (default 0.20). Bigger print → stop farther away",
+    )
     return p.parse_args()
 
 
@@ -113,8 +133,12 @@ def main() -> int:
         print("`--no-voice` needs `--auto` so the survey still starts.")
         return 1
 
-    print("Network: Tello on Wi-Fi, Grok Voice via USB tether on this laptop.")
-    gains = Gains(target_area=args.target_area)
+    print("Network: built-in Wi-Fi → internet/Grok; USB dongle → Tello.")
+    gains = Gains(
+        target_area=args.target_area,
+        tag_size_m=args.tag_size_m,
+        close_m=args.close_feet * 0.3048,
+    )
     target_tag = None if args.target_tag < 0 else args.target_tag
     voice = None
 
@@ -133,7 +157,7 @@ def main() -> int:
         on_phase=on_phase,
     )
 
-    drone = MockDrone(args.camera) if args.mock else TelloDrone()
+    drone = MockDrone(args.camera) if args.mock else TelloDrone(iface=args.tello_iface)
     drone.connect()
     drone.stream_on()
     print("Tello stream up.")
@@ -146,7 +170,7 @@ def main() -> int:
 
         voice = start_voice_thread(mission)
         if not voice.ready.wait(GROK_READY_S):
-            print(f"Grok Voice did not connect in {GROK_READY_S:.0f}s. Check USB tether and API key.")
+            print(f"Grok Voice did not connect in {GROK_READY_S:.0f}s. Check laptop Wi-Fi/internet and API key.")
             if not args.auto:
                 drone.close()
                 return 1
@@ -211,12 +235,13 @@ def main() -> int:
                     mission,
                     tick.box,
                     tick.err_x,
-                    tick.area,
                     tick.yaw,
                     tick.fwd,
                     tick.up,
                     tick.stale,
                     bat,
+                    tag_w=tick.width,
+                    need_w=tick.need_w,
                 )
                 if frame is not None
                 else np.zeros((360, 640, 3), dtype=np.uint8)

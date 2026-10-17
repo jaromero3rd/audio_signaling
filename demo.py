@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Demo entry: Grok Voice on this laptop, Tello on Wi-Fi, internet over USB tether."""
+"""Demo entry: Grok on laptop Wi-Fi, Tello on USB Wi-Fi dongle."""
 
 from __future__ import annotations
 

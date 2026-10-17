@@ -26,7 +26,8 @@ if str(ROOT) not in sys.path:
 
 from drone_interface.tello_client import MockDrone, TelloDrone
 from ground_station.apriltag import FAMILIES, AprilTagDetector
-from ground_station.control import yaw_forward
+from ground_station.control import width_frac_for_distance, yaw_forward
+from ground_station.mission import CLOSE_FEET_DEFAULT, TAG_SIZE_M_DEFAULT
 from ground_station.vision import Box
 
 FRAME_STALE_S = 0.5
@@ -110,9 +111,16 @@ def parse_args() -> argparse.Namespace:
         "--target-area",
         type=float,
         default=0.12,
-        help="stop approaching once the tag fills this fraction of the frame",
+        help="unused when using tag width; kept for compatibility",
     )
+    p.add_argument("--close-feet", type=float, default=CLOSE_FEET_DEFAULT)
+    p.add_argument("--tag-size-m", type=float, default=TAG_SIZE_M_DEFAULT)
     p.add_argument("--hz", type=float, default=12.0)
+    p.add_argument(
+        "--tello-iface",
+        default=None,
+        help="USB dongle interface (e.g. en8). Default: auto-detect 192.168.10.x",
+    )
     return p.parse_args()
 
 
@@ -120,7 +128,7 @@ def main() -> int:
     args = parse_args()
     tag_id = None if args.tag_id < 0 else args.tag_id
     detector = AprilTagDetector(family=args.family, tag_id=tag_id)
-    drone = MockDrone(args.camera) if args.mock else TelloDrone()
+    drone = MockDrone(args.camera) if args.mock else TelloDrone(iface=args.tello_iface)
     drone.connect()
     drone.stream_on()
 
@@ -154,6 +162,9 @@ def main() -> int:
             box = detector.detect(frame) if frame is not None else None
             yaw, fwd, up, err_x, area = (0, 0, 0, None, None)
             if frame is not None:
+                need_w = width_frac_for_distance(
+                    args.tag_size_m, args.close_feet * 0.3048, frame.shape
+                )
                 yaw, fwd, up, err_x, area = yaw_forward(
                     box,
                     frame.shape,
@@ -165,6 +176,7 @@ def main() -> int:
                     target_area=args.target_area,
                     kp_up=args.kp_up,
                     max_up=args.max_up,
+                    target_width=need_w,
                 )
 
             if flying:

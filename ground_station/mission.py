@@ -9,14 +9,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ground_station.apriltag import AprilTagDetector
-from ground_station.control import yaw_forward
+from ground_station.control import tag_width_frac, width_frac_for_distance, yaw_forward
 from ground_station.vision import DEFAULT_WEIGHTS, Box, union_boxes
 
 SEARCH_YAW = 22
 SEARCH_TIMEOUT_S = 40.0
-APPROACH_TIMEOUT_S = 25.0
-DWELL_S = 0.8
+APPROACH_TIMEOUT_S = 60.0
+MIN_APPROACH_S = 2.5
+DWELL_S = 1.5
 FRAME_STALE_S = 0.5
+CLOSE_FEET_DEFAULT = 2.0
+TAG_SIZE_M_DEFAULT = 0.20
 
 
 @dataclass
@@ -29,6 +32,8 @@ class Gains:
     max_up: int = 20
     deadband: float = 0.08
     target_area: float = 0.12
+    tag_size_m: float = TAG_SIZE_M_DEFAULT
+    close_m: float = CLOSE_FEET_DEFAULT * 0.3048
 
 
 @dataclass
@@ -40,6 +45,8 @@ class Tick:
     box: Box | None = None
     err_x: float | None = None
     area: float | None = None
+    width: float | None = None
+    need_w: float | None = None
     stale: bool = False
 
 
@@ -196,16 +203,11 @@ class SurveyMission:
                 seeking = True
                 if target_box is None:
                     self._set_phase_locked("search_target")
-                elif elapsed > APPROACH_TIMEOUT_S:
+                elif self._reached(target_box, frame.shape, elapsed, now):
                     self._set_phase_locked("survey")
-                else:
-                    if self._close_enough(target_box, frame.shape):
-                        if self._dwell_t is None:
-                            self._dwell_t = now
-                        elif now - self._dwell_t >= DWELL_S:
-                            self._set_phase_locked("survey")
-                    else:
-                        self._dwell_t = None
+                elif elapsed > APPROACH_TIMEOUT_S:
+                    print("approach timeout — still not close enough, returning home")
+                    self._set_phase_locked("search_home")
 
             elif phase == "survey":
                 box = target_box
@@ -231,16 +233,10 @@ class SurveyMission:
                 seeking = True
                 if home_box is None:
                     self._set_phase_locked("search_home")
+                elif self._reached(home_box, frame.shape, elapsed, now):
+                    self._set_phase_locked("land")
                 elif elapsed > APPROACH_TIMEOUT_S:
                     self._set_phase_locked("land")
-                else:
-                    if self._close_enough(home_box, frame.shape):
-                        if self._dwell_t is None:
-                            self._dwell_t = now
-                        elif now - self._dwell_t >= DWELL_S:
-                            self._set_phase_locked("land")
-                    else:
-                        self._dwell_t = None
 
             elif phase == "land":
                 if not self._land_sent:
@@ -258,6 +254,11 @@ class SurveyMission:
                 else:
                     self._set_phase_locked("done")
 
+            need_w = (
+                width_frac_for_distance(g.tag_size_m, g.close_m, frame.shape)
+                if frame is not None
+                else None
+            )
             if box is not None and frame is not None and seeking:
                 yaw, fwd, up, err_x, area = yaw_forward(
                     box,
@@ -270,10 +271,12 @@ class SurveyMission:
                     target_area=g.target_area,
                     kp_up=g.kp_up,
                     max_up=g.max_up,
+                    target_width=need_w,
                 )
             elif seeking and box is None and self.flying:
                 yaw = SEARCH_YAW
 
+            width = tag_width_frac(box, frame.shape) if box is not None and frame is not None else None
             return Tick(
                 yaw=yaw,
                 fwd=fwd,
@@ -282,10 +285,26 @@ class SurveyMission:
                 box=box,
                 err_x=err_x,
                 area=area,
+                width=width,
+                need_w=need_w,
                 stale=stale,
             )
+
+    def _need_width(self, shape) -> float:
+        return width_frac_for_distance(self.gains.tag_size_m, self.gains.close_m, shape)
 
     def _close_enough(self, box: Box, shape) -> bool:
         g = self.gains
         err_x = (box.cx / shape[1]) - 0.5
-        return abs(err_x) <= g.deadband and box.area_frac(shape) >= g.target_area
+        width = tag_width_frac(box, shape)
+        need = self._need_width(shape)
+        return abs(err_x) <= g.deadband and width >= need
+
+    def _reached(self, box: Box, shape, elapsed: float, now: float) -> bool:
+        if elapsed < MIN_APPROACH_S or not self._close_enough(box, shape):
+            self._dwell_t = None
+            return False
+        if self._dwell_t is None:
+            self._dwell_t = now
+            return False
+        return now - self._dwell_t >= DWELL_S

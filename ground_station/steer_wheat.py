@@ -109,12 +109,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--deadband", type=float, default=0.08, help="|err_x| below this counts as centered")
     p.add_argument("--target-area", type=float, default=0.18, help="stop approaching once box fills this fraction")
     p.add_argument("--hz", type=float, default=12.0)
+    p.add_argument(
+        "--tello-iface",
+        default=None,
+        help="USB dongle interface (e.g. en8). Default: auto-detect 192.168.10.x",
+    )
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    drone = MockDrone(args.camera) if args.mock else TelloDrone()
+    drone = MockDrone(args.camera) if args.mock else TelloDrone(iface=args.tello_iface)
     detector = make_detector(args.detector, weights=args.weights, conf=args.conf)
     drone.connect()
     drone.stream_on()
