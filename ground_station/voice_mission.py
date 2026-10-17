@@ -4,12 +4,14 @@
 One process. No takeoff/land keys. Speak “survey the wheat”, or pass --auto
 to start as soon as Grok and the Tello stream are up.
 
-Space aborts. q quits.
+Or use --controller droid for the embedded Factory SDK controller.
+Space aborts. q quits. y approves a pending Droid hardware request.
 """
 
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import os
 import sys
 import time
@@ -43,6 +45,7 @@ def draw_hud(
     battery: int | None,
     tag_w: float | None = None,
     need_w: float | None = None,
+    controller_hint: str = "say survey the wheat  |  space abort  |  q quit",
 ) -> np.ndarray:
     vis = frame.copy()
     h, w = vis.shape[:2]
@@ -71,7 +74,7 @@ def draw_hud(
         else "",
         f"bat={battery}%" if battery is not None else "",
         "STALE" if stale else "",
-        "say survey the wheat  |  space abort  |  q quit",
+        controller_hint,
     ]
     y = 22
     for line in lines:
@@ -92,6 +95,15 @@ def parse_args() -> argparse.Namespace:
         description="Grok on laptop Wi-Fi; Tello on USB Wi-Fi dongle."
     )
     p.add_argument("--mock", action="store_true")
+    p.add_argument("--controller", choices=("voice", "droid"), default="voice")
+    p.add_argument("--allow-real-flight", action="store_true",
+                   help="explicitly enable Tello in Droid mode; each start still needs local y approval")
+    p.add_argument("--droid-model", default=None, help="Factory model ID (default: CLI setting)")
+    p.add_argument("--droid-timeout", type=float, default=60.0)
+    p.add_argument("--droid-prompt", default="Inspect the status and request one survey.",
+                   help="initial operator instruction for the persistent Droid session")
+    p.add_argument("--photon-env", type=Path, help="private Photon environment file (not passed to Droid)")
+    p.add_argument("--no-photon", action="store_true", help="explicitly disable system notifications")
     p.add_argument(
         "--tello-iface",
         default=None,
@@ -129,10 +141,38 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     load_dotenv()
     args = parse_args()
-    if args.no_voice and not args.auto:
+    if args.controller == "droid" and args.auto:
+        print("Droid mode does not allow --auto; survey starts must use the controlled tool.")
+        return 1
+    if args.controller == "droid" and not args.mock and not args.allow_real_flight:
+        print("Droid mode requires --mock, or explicit --allow-real-flight plus local approval.")
+        return 1
+    if args.no_voice and not args.auto and args.controller != "droid":
         print("`--no-voice` needs `--auto` so the survey still starts.")
         return 1
 
+    with ExitStack() as cleanup:
+        photon = None
+        if not args.no_photon and (args.controller == "droid" or args.photon_env is not None):
+            from ground_station.photon import PhotonClient, PhotonConfig, PhotonError, PhotonNotifier
+
+            try:
+                config = PhotonConfig.load(args.photon_env)
+                if config is not None:
+                    client = PhotonClient(config)
+                    photon = PhotonNotifier(client, mock=args.mock)
+                    photon.start()
+                    cleanup.callback(photon.close)
+                    print("Photon system notifications configured for the verified private user.")
+                elif args.controller == "droid":
+                    print("Photon is not configured; use --photon-env to enable system notifications.")
+            except PhotonError as error:
+                print(f"Photon setup failed: {error}. No drone connection opened.")
+                return 1
+        return _run_mission(args, photon, cleanup)
+
+
+def _run_mission(args, photon, cleanup) -> int:
     print("Network: built-in Wi-Fi → internet/Grok; USB dongle → Tello.")
     gains = Gains(
         target_area=args.target_area,
@@ -141,11 +181,15 @@ def main() -> int:
     )
     target_tag = None if args.target_tag < 0 else args.target_tag
     voice = None
+    droid = None
+    driver = None
 
     def on_phase(prev: str, phase: str) -> None:
         print(f"mission {prev} → {phase}")
         if voice is not None:
             voice.notify(f"phase is now {phase}")
+        if phase == "abort" and photon is not None:
+            photon.notify("abort")
 
     mission = SurveyMission(
         target_kind=args.target,
@@ -157,12 +201,28 @@ def main() -> int:
         on_phase=on_phase,
     )
 
+    if args.controller == "droid":
+        from ground_station.agent.driver import MissionDriver
+        from ground_station.agent.worker import DroidWorker
+
+        driver = MissionDriver(mission, mock=args.mock)
+        droid = DroidWorker(driver, model=args.droid_model, timeout=args.droid_timeout)
+        cleanup.callback(droid.close)
+
     drone = MockDrone(args.camera) if args.mock else TelloDrone(iface=args.tello_iface)
+    cleanup.callback(drone.close)
     drone.connect()
     drone.stream_on()
     print("Tello stream up.")
 
-    if not args.no_voice:
+    if droid is not None:
+        droid.start(args.droid_prompt)
+        if not droid.ready.wait(50) or droid.failed.is_set():
+            print("Droid did not become ready. No flight was started.")
+            if photon is not None:
+                photon.notify("controller_failed")
+            return 1
+    elif not args.no_voice:
         if not os.environ.get("XAI_API_KEY"):
             print("Missing XAI_API_KEY. Put it in .env or export it.")
             return 1
@@ -172,7 +232,6 @@ def main() -> int:
         if not voice.ready.wait(GROK_READY_S):
             print(f"Grok Voice did not connect in {GROK_READY_S:.0f}s. Check laptop Wi-Fi/internet and API key.")
             if not args.auto:
-                drone.close()
                 return 1
             print("Continuing without voice because --auto was set.")
             voice = None
@@ -190,7 +249,9 @@ def main() -> int:
     period = 1.0 / max(args.hz, 1.0)
     flying = False
 
-    if args.auto:
+    if droid is not None:
+        print("Droid controls mission requests. y = approve pending request, space = stop, q = quit.")
+    elif args.auto:
         print("Survey starting. Space = abort, q = quit.")
     else:
         print("Say “survey the wheat”. Space = abort, q = quit.")
@@ -206,20 +267,47 @@ def main() -> int:
             tick = mission.tick(frame, t0)
             snap = mission.snapshot()
 
-            if tick.action == "takeoff" and not flying:
-                drone.takeoff()
-                flying = True
+            stopped = driver is not None and driver.snapshot()["stopped"]
+            if stopped and flying:
                 drone.hover()
+                drone.land()
+                flying = False
+                if photon is not None:
+                    photon.notify("land")
+            elif not stopped and tick.action == "takeoff" and not flying:
+                # A timed-out takeoff may still have reached the drone. Ensure
+                # the finally block attempts landing even without its ACK.
+                flying = True
+                drone.takeoff()
+                drone.hover()
+                if photon is not None:
+                    photon.notify("takeoff")
             elif tick.action == "land" and flying:
                 drone.hover()
                 drone.land()
                 flying = False
-            elif tick.action == "photo":
+                if photon is not None:
+                    photon.notify("land")
+            extra_photo = driver.take_photo_request() if driver is not None else False
+            if not stopped and (tick.action == "photo" or extra_photo):
                 path = drone.capture_photo()
                 mission.note_photo(path)
                 print(f"survey photo {path}")
+                if photon is not None and path is not None and path.is_file():
+                    photon.notify("photo")
+                if droid is not None and path is not None:
+                    droid.submit(
+                        "A survey photo was saved locally. Check mission status; do not claim image analysis.",
+                        {"kind": "photo_captured", "photo_path": str(path)},
+                    )
 
-            if flying:
+            if photon is not None:
+                if droid is not None and droid.failed.is_set():
+                    photon.notify("controller_failed")
+                if snap["phase"] == "done" and not flying and (driver is None or not driver.snapshot()["stopped"]):
+                    photon.notify("complete")
+
+            if flying and not stopped:
                 if snap["phase"] in ("idle", "done"):
                     drone.hover()
                 else:
@@ -242,17 +330,25 @@ def main() -> int:
                     bat,
                     tag_w=tick.width,
                     need_w=tick.need_w,
+                    controller_hint=(
+                        f"Droid | pending={driver.snapshot()['pending_approval'] or 'none'} | y approve | space stop | q quit"
+                        if driver is not None
+                        else "say survey the wheat  |  space abort  |  q quit"
+                    ),
                 )
                 if frame is not None
                 else np.zeros((360, 640, 3), dtype=np.uint8)
             )
             cv2.imshow("agridrone mission", vis)
             key = cv2.waitKey(1) & 0xFF
+            if key == ord("y") and driver is not None:
+                flight_ready = frame is not None and not tick.stale and bat is not None and bat >= 20
+                print(f"Local approval: {driver.approve_pending(flight_ready=flight_ready)}")
             if key in (ord("q"), 27):
-                mission.request_abort()
+                driver.stop() if driver is not None else mission.request_abort()
                 break
             if key == ord(" "):
-                mission.request_abort()
+                driver.stop() if driver is not None else mission.request_abort()
 
             if snap["phase"] == "done" and args.auto and args.no_voice:
                 break
@@ -262,14 +358,17 @@ def main() -> int:
                 time.sleep(period - dt)
     except KeyboardInterrupt:
         print()
-        mission.request_abort()
+        driver.stop() if driver is not None else mission.request_abort()
     finally:
+        if driver is not None:
+            driver.stop()
         if flying:
             try:
                 drone.land()
+                if photon is not None:
+                    photon.notify("land")
             except Exception:
                 drone.emergency()
-        drone.close()
         cv2.destroyAllWindows()
     return 0
 

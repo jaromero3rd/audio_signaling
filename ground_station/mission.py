@@ -94,7 +94,7 @@ class SurveyMission:
         self.home_det = AprilTagDetector(family=family, tag_id=home_tag)
         self.same_mark = self.target_kind == "tag" and target_tag == home_tag
         self.on_phase = on_phase
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.phase = "idle"
         self.flying = False
         self.target_seen = False
