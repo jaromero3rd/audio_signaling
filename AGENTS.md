@@ -6,109 +6,128 @@
 
 ### Session lifecycle
 
-`DroidSession` is instantiated once per run at the top of `voice_mission.main()`,
-before the drone connects.  It loads persisted mission state from `.state/` and
-registers the four tool callables.  On exit (normal, abort, or exception) the
-`finally` block calls `droid.close()`, which flushes state to disk.
+`voice_mission.main()` creates a `DroidWorker` (in `ground_station/agent/worker.py`) which
+runs a `DroidController` (in `ground_station/agent/controller.py`) in a background thread.
+`DroidController` manages a long-lived Factory Droid SDK `Session`.
 
-If the Factory Python SDK is not installed, `DroidSession` silently falls back to
-`_MockDroidSession`, which applies threshold logic locally.  The tool registry
-and call path are identical in both cases.
+On startup, `droid.start(instruction)` queues an initial instruction (e.g. "inspect status
+and wait for an operator voice request"). The SDK session is kept open for the process
+lifetime. On exit, `droid.close()` stops the driver and cancels the background thread.
 
-### Decision loop (per photo)
+`droid_session.py` contains an older `DroidSession` / `_MockDroidSession` class. It is not
+called from `voice_mission.py` and is not part of the active code path.
+
+### Decision loop — default mode (no `--crop-analysis`)
+
+In the default configuration, AprilTag/YOLO steer the drone locally and Droid only handles
+high-level start/land decisions. The mission loop calls Droid via voice (`DroidVoiceGateway`)
+or the `--no-voice` host fallback; no photo analysis flows through Droid.
+
+### Decision loop — crop-analysis mode (`--crop-analysis` / `--fake-analysis`)
+
+When crop analysis is enabled, `voice_mission` builds a `SurveyPipeline` and passes it to
+`DroidWorker`. After a photo is captured, the loop calls `droid.submit_photo(path)`, which:
 
 ```
 drone captures photo
-  → analyze_photo_with_grok_async()     # background thread, non-blocking
-      → vision_grok.analyze_photo()     # Grok multimodal API
-          returns: health_score (0–1), analysis_summary
-  → chalk_eval_mission.evaluate_and_log()
-      → Chalk resolver pipeline
-          returns: health_flag, severity, recommended_action
-  → droid.feed_analysis(result)         # stores context in session
-  → droid.get_decision()
-      returns: {action, reason, tool_call?}
-  → tool dispatch
+  → DroidWorker.submit_photo()
+      → SurveyPipeline.process_photo()
+          → analyzer.analyze()            # GrokImageAnalyzer or FakeImageAnalyzer
+              returns: health_score, analysis_summary, observations
+          → [optional --chalk] chalk_quality.evaluate_survey_named()
+              returns: health_flag, severity, recommended_action
+          → driver.accept_analysis()      # host validates capture_id still live
+          → controller.handle()           # Droid SDK model turn
+              → model reads get_mission_status + get_survey_context
+              → model issues issue_drone_command / send_photon_alert
 ```
 
-### Example: critical health score
+Analysis is logged to a local SQLite file at `data/surveys.sqlite3`.
 
+### Standalone Chalk evaluation path
+
+`chalk_eval_mission.evaluate_and_log()` (from PR #12) is a separate, simpler helper used
+when crop analysis is enabled but the full `SurveyPipeline` is not active. The `on_grok_complete`
+callback in `voice_mission` calls it after `analyze_photo_with_grok_async()` returns:
+
+```python
+chalk_eval_mission.evaluate_and_log(
+    photo_url: str,
+    health_score: float,
+    field_id: str,
+) -> {"health_flag": str, "severity": float, "action": str}
 ```
-health_score = 0.28  →  action = "alert_operator"
-  → droid._send_photon_alert(
-        message  = "corn-north critical: health 0.28",
-        photo_url = "captures/img_042.jpg"
-    )
-  → photon_alert.send_photon_alert() shells out to photon-imessage-agent/src/alert.ts
-  → operator receives iMessage with photo attachment
-```
 
-Health thresholds used by the mock session (real Droid may differ):
+It calls `chalk_client.evaluate_survey()`, logs the result via `store.append_decision()`,
+and caches it via `store.set_last_survey()`.
 
-| health_score | action |
+### State persistence
+
+All persistent state goes to a Chalk Volume, not a local directory.
+The volume name comes from `CHALK_STATE_VOLUME` (default: `"droid-mission-state"`).
+
+| Path in volume | Content |
 |---|---|
-| >= 0.7 | continue_survey |
-| 0.4 – 0.69 | reimage |
-| < 0.4 | alert_operator |
+| `mission_state.json` | Latest mission snapshot |
+| `decision_log.jsonl` | Append-only log of decisions, one JSON per line |
+| `fields/<field_id>.json` | Most recent `evaluate_survey` result per field |
+
+Persistence is handled by `ground_station/agent/store.py` via the Chalk Volume gRPC API
+(chalkpy `VolumeService`). Access is through the ChalkClient's authenticated server channel.
 
 ---
 
 ## Section 2: Tool Registry & Schema
 
-All four tools are registered in `DroidSession.__init__` and callable by Droid
-during `get_decision()`.  Signatures match `ground_station/agent/session.py`.
+`DroidController` registers exactly four tools, grouped as an MCP server named
+`"agridrone"`. The model may only call these; all shell/file/other MCP access is blocked.
+Tool budget: 12 calls per model turn, 16 turns per process.
+
+### `get_mission_status`
+
+```python
+get_mission_status() -> str  # JSON
+```
+
+Returns `driver.snapshot()`: drone_id, mock flag, stopped, survey_started,
+extra_photos_remaining, pending_approval, capture_id, analysis_ready, photo_queued,
+and the nested mission snapshot. Call this before issuing any command.
 
 ### `issue_drone_command`
 
 ```python
 issue_drone_command(
-    drone_id:  str,        # target drone identifier, e.g. "tello-0"
-    waypoints: list,       # list of (lat, lon, alt) tuples
-    action:    str,        # "survey" | "reimage" | "return" | "hover"
-) -> {"ok": bool, "message": str}
+    drone_id: str,    # must match the driver's drone_id, e.g. "drone-1"
+    action:   Action, # "start_survey" | "capture_photo" | "continue_survey" | "land" | "abort"
+) -> str  # JSON: {"ok": bool, ...}
 ```
 
-Queues a flight command.  Appends a decision record to `.state/decisions.jsonl`.
+Routes to `driver.issue()`. Real hardware actions (`start_survey`, `capture_photo`) require
+local operator approval (press `y` in the HUD); the response will contain
+`"reason": "local_approval_required"` until approved. Approval has a 60-second TTL.
+`land` and `abort` always execute immediately.
 
-### `request_reimage`
+### `get_survey_context`
 
 ```python
-request_reimage(
-    drone_id: str,   # target drone
-    lat:      float, # decimal degrees
-    lon:      float, # decimal degrees
-) -> {"ok": bool, "message": str}
+get_survey_context() -> str  # JSON
 ```
 
-Schedules the drone to re-photograph a specific coordinate.
-Logged with type `"reimage_requested"`.
+Returns the pipeline's current context: `field_id`, `latest` analysis (the most recently
+accepted `SurveyAnalysis`), and `history` (last 5 survey records from the local SQLite log).
+Returns a placeholder dict when no pipeline is configured.
 
 ### `send_photon_alert`
 
 ```python
-send_photon_alert(
-    message:      str,            # alert text sent to operator
-    photo_url:    str,            # local path or remote URL
-    photo_base64: str | None = None,  # base64 bytes; takes priority over photo_url
-) -> {"ok": bool, ...}
+send_photon_alert() -> str  # JSON: {"ok": bool, "status": str, "delivery_confirmed": false}
 ```
 
-Delegates to `photon_client.send_alert()`, which calls
-`photon_alert.send_photon_alert()`.  That shells out to
-`photon-imessage-agent/src/alert.ts` via Bun.  Requires Bun >= 1.3 and
-`bun install` inside `photon-imessage-agent/`.
-
-### `query_chalk_features`
-
-```python
-query_chalk_features(
-    field_id: str,   # field identifier, e.g. "field-0"
-) -> dict            # Chalk feature evaluation result or local fallback
-```
-
-Queries the Chalk online feature pipeline for the given field.  In environments
-without a configured Chalk store, returns a note directing callers to use
-`chalk_client.evaluate_survey()` with fresh analysis data instead.
+No parameters. Queues a host-formatted iMessage notification for the current validated
+analysis by calling `pipeline.send_alert()` → `photon.notify_analysis()`. Returns
+`{"ok": False, "reason": "photon_not_configured"}` if the Photon notifier was not started
+(i.e. `--no-photon` was passed or Photon env vars are absent). Requires crop-analysis mode
+to have a live analysis in the pipeline.
 
 ---
 
@@ -116,34 +135,26 @@ without a configured Chalk store, returns a note directing callers to use
 
 ### Five roles
 
-| Role | Responsibility |
-|---|---|
-| `coordinator` | Decomposes tasks, routes work to other roles, tracks blockers |
-| `drone` | Flight control implementation, hardware interface, stream handling |
-| `logistics` | Deployment, environment setup, dependency management |
-| `vision` | Grok image analysis, wheat detection, Chalk feature pipeline |
-| `release` | Bot-branch checks, publish gating, credential scanning |
+| Role | Profile file | Responsibility |
+|---|---|---|
+| `coordinator` | `grok-team/profiles/coordinator.md` | Decomposes tasks, routes work, tracks blockers |
+| `drone` | `grok-team/profiles/drone.md` | Flight control, hardware interface, stream handling |
+| `logistics` | `grok-team/profiles/logistics.md` | Deployment, environment setup, dependency management |
+| `vision` | `grok-team/profiles/vision.md` | Grok image analysis, wheat detection, Chalk feature pipeline |
+| `release` | `grok-team/profiles/release.md` | Bot-branch checks, publish gating, credential scanning |
 
-All five share a private task-queue history in `grok-team/.state/`.
-Cross-session memory is disabled; each task receives only its explicit context.
-
-### Task handoff pattern
+### Task commands (`grok-team/`)
 
 ```sh
-# Submit a task to a role
 bun run ask coordinator "Prepare bounded photo-to-analysis handoff"
-# → prints job ID
-
-# Poll result
-bun run status <job-ID>
-
-# Check all role states
 bun run status
+bun run bootstrap
+bun run ship
+bun run doctor
 ```
 
-Tasks route through the local Grok CLI worker (`bun start`).  One worker process
-serves all five roles sequentially.  Each task is capped at 90 seconds; roles
-get at most three model calls per task.
+Tasks route through the local Grok CLI worker (`bun start`). One worker process serves all
+five roles sequentially.
 
 ### Bot branches workflow
 
@@ -156,12 +167,11 @@ The release role pushes reviewed commits to bot branches after passing:
 - Whitespace lint
 - Credential scan (no detected secrets)
 
-Branch publication requires `jaromero3rd/audio_signaling` as origin and
-current `origin/main` ancestry.  **Never merges to main automatically.**
-Human review is required before any bot branch is integrated.
+Branch publication requires `jaromero3rd/audio_signaling` as origin and current
+`origin/main` ancestry. **Never merges to main automatically.** Human review is required
+before any bot branch is integrated.
 
 ```sh
-# After release bot pushes
 git fetch origin
 git switch --track origin/bots/drone/camera-receive
 ```
@@ -173,7 +183,7 @@ git switch --track origin/bots/drone/camera-receive
 ### Prerequisites
 
 - Python >= 3.10
-- Bun >= 1.3 (for `photon-imessage-agent` and `grok-team`)
+- Bun >= 1.3 (for `grok-team/`)
 - Cursor with Factory Droid extension
 
 ### 1. Install Factory Droid CLI
@@ -185,12 +195,10 @@ droid --version
 droid   # complete browser sign-in if prompted
 ```
 
-Each teammate signs in to their own Factory account.  Do not share credentials.
-A separate `FACTORY_API_KEY` is only needed for non-interactive (CI/headless) use.
+Each teammate signs in to their own Factory account. Do not share credentials.
+`FACTORY_API_KEY` is only needed for non-interactive (CI/headless) use.
 
 ### 2. Create `.env`
-
-Copy the template and fill in your values:
 
 ```sh
 cp .env.example .env   # if present; otherwise create manually
@@ -199,17 +207,25 @@ cp .env.example .env   # if present; otherwise create manually
 Required keys:
 
 ```dotenv
-XAI_API_KEY=           # xAI console → project API key
-PHOTON_API_KEY=        # Photon 2.0 dashboard → project key
-PHOTON_PROJECT_ID=
-PHOTON_AGENT_USER_ID=
-CHALK_CLIENT_ID=       # Chalk workspace → Settings > Service Tokens
+XAI_API_KEY=            # xAI console → project API key (Grok vision + voice)
+CHALK_CLIENT_ID=        # Chalk workspace → Settings > Service Tokens
 CHALK_CLIENT_SECRET=
-CHALK_ENVIRONMENT=     # development environment ID, not display name
-FACTORY_API_KEY=       # only if running Droid outside Cursor
+CHALK_ENVIRONMENT=      # development environment ID, not display name
+CHALK_STATE_VOLUME=     # optional; defaults to "droid-mission-state"
+FACTORY_API_KEY=        # only if running Droid outside Cursor
 ```
 
-Verify presence without printing values:
+Photon iMessage notifications (optional — supply via `--photon-env` or in `.env`):
+
+```dotenv
+PHOTON_API_KEY=
+PHOTON_PROJECT_ID=      # pho_prj_... format
+PHOTON_ASSIGNMENT_ID=   # pho_asg_... format
+PHOTON_AGENT_HANDLE=    # E.164 phone number (agent/sender)
+PHOTON_USER_HANDLE=     # E.164 phone number (recipient); or PHOTON_TEST_SENDER
+```
+
+Verify required keys without printing values:
 
 ```sh
 python3 -c "
@@ -221,7 +237,7 @@ if p.is_file():
     if l and not l.startswith('#') and '=' in l:
       k,_,v = l.partition('='); e[k]=v
 e.update(os.environ)
-for svc,keys in [('xAI',['XAI_API_KEY']),('Photon',['PHOTON_API_KEY']),('Chalk',['CHALK_CLIENT_ID','CHALK_CLIENT_SECRET'])]:
+for svc,keys in [('xAI',['XAI_API_KEY']),('Chalk',['CHALK_CLIENT_ID','CHALK_CLIENT_SECRET'])]:
   print(svc, 'present' if all(e.get(k,'').strip() for k in keys) else 'MISSING')
 "
 ```
@@ -232,10 +248,10 @@ for svc,keys in [('xAI',['XAI_API_KEY']),('Photon',['PHOTON_API_KEY']),('Chalk',
 pip install -r requirements.txt
 ```
 
-### 4. Install Photon agent dependencies
+### 4. Install grok-team dependencies
 
 ```sh
-cd photon-imessage-agent
+cd grok-team
 bun install
 cd ..
 ```
@@ -243,24 +259,35 @@ cd ..
 ### 5. Run end-to-end demo
 
 ```sh
-# Mock mode (uses webcam, no real drone)
-python demo.py --mock --auto
+# Mock mode — uses webcam, no real drone, Droid high-level start/land only
+python demo.py --mock
 
-# Real Tello drone
-python demo.py --auto
+# With Grok crop-health analysis after each survey photo
+python demo.py --mock --crop-analysis
+
+# Simulated crop analysis (no XAI_API_KEY needed)
+python demo.py --mock --fake-analysis
+
+# Real Tello drone (Droid still requires local y approval for hardware actions)
+python demo.py --allow-real-flight
+
+# Skip voice; Droid requests one survey automatically
+python demo.py --mock --no-voice
 ```
 
-`--auto` starts the survey immediately once Grok and the stream are ready.
-`--no-voice` skips Grok voice and uses the mission planner directly (requires `--auto`).
+`demo.py` is a thin wrapper over `voice_mission.main()`. All flags pass through.
 
 Watch for:
 
 ```
-Droid session initialized.
+Droid session → local CLI (mission tools on this laptop)
 Tello stream up.
 Grok is running on this laptop.
-Survey starting. Space = abort, q = quit.
+Droid controls mission requests. y = approve pending request, space = stop, q = quit.
 ```
 
-A `health_score < 0.4` during the survey triggers `send_photon_alert()` and
-delivers an iMessage to the configured operator.
+Photon notifications fire on takeoff, photo, land, complete, abort, and
+`controller_failed`. `send_photon_alert` (the Droid tool) additionally delivers an
+analysis-specific iMessage when the model judges the crop finding critical enough to
+warrant operator attention. No threshold triggers this automatically; it requires
+the model to call the tool during a crop-analysis turn.
