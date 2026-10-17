@@ -139,24 +139,28 @@ class DroidSession:
         })
         return {"ok": True, "message": f"Reimage scheduled at ({lat:.4f}, {lon:.4f})"}
 
-    def _send_photon_alert(self, message: str, photo_url: str) -> dict:
+    def _send_photon_alert(self, message: str, photo_url: str,
+                           photo_base64: str | None = None) -> dict:
         """Send alert to operator via Photon.
 
         Args:
             message: Alert text
-            photo_url: URL or path to photo to include
+            photo_url: Remote URL or local path to photo
+            photo_base64: Base64-encoded image bytes (takes priority over photo_url)
 
         Returns:
-            {"ok": bool, "message": str}
+            {"ok": bool, ...}
         """
-        # TODO: Wire to photon_client.py
-        print(f"[STUB] Photon alert: {message} (photo: {photo_url})")
+        from ground_station.photon_client import send_alert as _photon_send
+
+        result = _photon_send(message, photo_url=photo_url, photo_base64=photo_base64)
         append_decision({
             "type": "alert_sent",
             "message": message,
             "photo_url": photo_url,
+            "ok": result.get("ok"),
         })
-        return {"ok": True, "message": "Alert queued"}
+        return result
 
     def _query_chalk_features(self, field_id: str) -> dict:
         """Query Chalk features for a field.
