@@ -34,12 +34,21 @@ def _ensure_bgr(frame: np.ndarray) -> np.ndarray:
 
 
 class TelloDrone:
-    def __init__(self, iface: str | None = None) -> None:
+    def __init__(
+        self,
+        iface: str | None = None,
+        *,
+        ssid: str | None = None,
+        dongle: int | None = None,
+        connect_wifi: bool = True,
+    ) -> None:
         from djitellopy import Tello
 
         from drone_interface.tello_net import prepare_tello_dongle
 
-        self._link = prepare_tello_dongle(iface)
+        self._link = prepare_tello_dongle(
+            iface, ssid=ssid, dongle=dongle, connect=connect_wifi
+        )
         self._tello = Tello()
         self._frame_read = None
         self._last_frame: np.ndarray | None = None

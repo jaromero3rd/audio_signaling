@@ -18,9 +18,11 @@ SEARCH_HOME_TIMEOUT_S = 90.0
 SCOUT_FWD = 14
 TARGET_LOST_FRAMES = 12
 APPROACH_TIMEOUT_S = 60.0
+HOME_APPROACH_TIMEOUT_S = 45.0
 MIN_APPROACH_S = 1.2
 DWELL_S = 0.6
 FRAME_STALE_S = 0.5
+ANALYSIS_HOLD_S = 90.0
 TURN_HOME_S = 3.5
 TURN_HOME_MAX_S = 6.0
 TURN_YAW = 55
@@ -30,6 +32,10 @@ SCOUT_HALF_S = 2.0
 HOME_LOST_FRAMES = 12
 CLOSE_FEET_DEFAULT = 2.0
 TAG_SIZE_M_DEFAULT = 0.20
+# Second tag-12 (base): land once tag fills this much of frame (~0.5–0.7 m for 20 cm print).
+HOME_LAND_WIDTH = 0.20
+# AprilTags often drop when too close / clipped — still land if already this close.
+HOME_LOST_GRACE_S = 1.0
 
 
 @dataclass
@@ -101,6 +107,7 @@ class SurveyMission:
         gains: Gains,
         weights: Path = DEFAULT_WEIGHTS,
         on_phase: Callable[[str, str], None] | None = None,
+        analysis_required: bool = False,
     ) -> None:
         self.gains = gains
         self.home_tag = home_tag
@@ -110,7 +117,9 @@ class SurveyMission:
         self.home_det = AprilTagDetector(family=family, tag_id=home_tag)
         self.same_mark = self.target_kind == "tag" and target_tag == home_tag
         self.on_phase = on_phase
-        self._lock = threading.Lock()
+        self.analysis_required = analysis_required
+        self._analysis_deadline: float | None = None
+        self._lock = threading.RLock()
         self.phase = "idle"
         self.flying = False
         self.target_seen = False
@@ -123,6 +132,8 @@ class SurveyMission:
         self._photo_sent = False
         self._home_miss = 0
         self._last_home_box: Box | None = None
+        self._home_best_width = 0.0
+        self._home_close_seen_t: float | None = None
         self._target_miss = 0
         self._last_target_box: Box | None = None
         self._dbg_t = 0.0
@@ -137,6 +148,7 @@ class SurveyMission:
                 "target_seen": self.target_seen,
                 "home_seen": self.home_seen,
                 "last_photo": self.last_photo,
+                "analysis_required": self.analysis_required,
             }
 
     def request_start(self) -> dict[str, Any]:
@@ -150,6 +162,8 @@ class SurveyMission:
             self._dwell_t = None
             self._home_miss = 0
             self._last_home_box = None
+            self._home_best_width = 0.0
+            self._home_close_seen_t = None
             self._target_miss = 0
             self._last_target_box = None
             return {"ok": True, "phase": self.phase}
@@ -164,6 +178,20 @@ class SurveyMission:
         with self._lock:
             self.last_photo = str(path) if path else None
 
+    def analysis_waiting(self) -> bool:
+        with self._lock:
+            return (
+                self.phase == "await_analysis" and self._analysis_deadline is not None
+                and time.time() < self._analysis_deadline
+            )
+
+    def continue_survey(self) -> dict[str, Any]:
+        with self._lock:
+            if not self.analysis_waiting():
+                return {"ok": False, "reason": "no_live_analysis_hold"}
+            self._set_phase_locked("turn_home")
+            return {"ok": True, "phase": self.phase}
+
     def _set_phase_locked(self, phase: str) -> None:
         if phase == self.phase:
             return
@@ -171,6 +199,9 @@ class SurveyMission:
         self.phase = phase
         self._phase_t = time.time()
         self._dwell_t = None
+        if phase == "approach_home":
+            self._home_best_width = 0.0
+            self._home_close_seen_t = None
         print(f"mission {prev} → {phase}")
         if self.on_phase:
             self.on_phase(prev, phase)
@@ -198,7 +229,12 @@ class SurveyMission:
             phase = self.phase
             elapsed = now - self._phase_t
 
-            if stale and self.flying and phase not in ("idle", "done", "land", "abort"):
+            # Stale video: abort most phases, but approach_home may land (tag often vanishes when close).
+            if (
+                stale
+                and self.flying
+                and phase not in ("idle", "done", "land", "abort", "approach_home")
+            ):
                 self._set_phase_locked("abort")
                 phase = "abort"
 
@@ -256,8 +292,19 @@ class SurveyMission:
                 if not self._photo_sent:
                     action = "photo"
                     self._photo_sent = True
+                    if self.analysis_required:
+                        self._analysis_deadline = now + ANALYSIS_HOLD_S
+                        self._set_phase_locked("await_analysis")
                 elif elapsed > 0.4:
                     self._set_phase_locked("turn_home")
+
+            elif phase == "await_analysis":
+                # Zero RC while cloud work runs. Reimages never renew this deadline.
+                if self._analysis_deadline is None or now >= self._analysis_deadline:
+                    self._set_phase_locked("abort")
+                    action = "land"
+                    self._land_sent = True
+                    self.flying = False
 
             elif phase == "turn_home":
                 # Spin in place. Do not lock onto tag 12 while it is still the target in view.
@@ -279,35 +326,48 @@ class SurveyMission:
 
             elif phase == "approach_home":
                 seeking = True
-                if home_box is None:
+                if home_box is not None and frame is not None:
+                    self._home_miss = 0
+                    self._last_home_box = home_box
+                    box = home_box
+                    w = tag_width_frac(home_box, frame.shape)
+                    self._home_best_width = max(self._home_best_width, w)
+                    if self._home_close_enough(home_box, frame.shape):
+                        if self._home_close_seen_t is None:
+                            self._home_close_seen_t = now
+                    if self._reached_home(home_box, frame.shape, elapsed, now):
+                        print(
+                            f"home tag close enough (w={w:.2f} need≈{self._need_width(frame.shape):.2f}) — landing"
+                        )
+                        self._set_phase_locked("land")
+                    elif elapsed > HOME_APPROACH_TIMEOUT_S:
+                        print("home approach timeout — landing")
+                        self._set_phase_locked("land")
+                    if now - self._dbg_t > 0.8 and self.phase == "approach_home":
+                        need = max(0.9 * self._need_width(frame.shape), HOME_LAND_WIDTH)
+                        print(
+                            f"approach_home tag_w={w:.2f} need={need:.2f} "
+                            f"err_x={(home_box.cx / frame.shape[1]) - 0.5:+.2f}"
+                        )
+                        self._dbg_t = now
+                else:
                     self._home_miss += 1
                     box = self._last_home_box
-                    if self._home_miss >= HOME_LOST_FRAMES:
+                    was_close = self._home_best_width >= (0.85 * HOME_LAND_WIDTH) or (
+                        self._home_close_seen_t is not None
+                        and now - self._home_close_seen_t <= HOME_LOST_GRACE_S
+                    )
+                    if was_close:
+                        print(
+                            f"lost home tag while close (best_w={self._home_best_width:.2f}) — landing"
+                        )
+                        self._set_phase_locked("land")
+                    elif self._home_miss >= HOME_LOST_FRAMES:
                         print("lost home tag — scouting again")
                         self._set_phase_locked("search_home")
                         self._home_miss = 0
                         self._last_home_box = None
                         box = None
-                else:
-                    self._home_miss = 0
-                    self._last_home_box = home_box
-                    box = home_box
-                    if self._reached(home_box, frame.shape, elapsed, now, min_s=0.3):
-                        print("home close enough — landing")
-                        self._set_phase_locked("land")
-                if (
-                    box is not None
-                    and frame is not None
-                    and now - self._dbg_t > 0.8
-                    and self.phase == "approach_home"
-                ):
-                    w = tag_width_frac(box, frame.shape)
-                    need = self._need_width(frame.shape)
-                    print(
-                        f"approach_home tag_w={w:.2f} need={need:.2f} "
-                        f"err_x={(box.cx / frame.shape[1]) - 0.5:+.2f}"
-                    )
-                    self._dbg_t = now
 
             elif phase == "land":
                 if not self._land_sent:
@@ -399,6 +459,14 @@ class SurveyMission:
         need = self._need_width(shape)
         return width >= (0.9 * need) and abs(err_x) <= g.arrival_deadband
 
+    def _home_close_enough(self, box: Box, shape) -> bool:
+        """Base / second ID-12: FOV range estimate or absolute width floor."""
+        g = self.gains
+        width = tag_width_frac(box, shape)
+        need = max(0.9 * self._need_width(shape), HOME_LAND_WIDTH)
+        err_x = (box.cx / shape[1]) - 0.5
+        return width >= need and abs(err_x) <= max(g.arrival_deadband, 0.30)
+
     def _reached(
         self,
         box: Box,
@@ -410,6 +478,15 @@ class SurveyMission:
     ) -> bool:
         wait = MIN_APPROACH_S if min_s is None else min_s
         if elapsed < wait or not self._close_enough(box, shape, wheat_ratio=wheat_ratio):
+            self._dwell_t = None
+            return False
+        if self._dwell_t is None:
+            self._dwell_t = now
+            return False
+        return now - self._dwell_t >= DWELL_S
+
+    def _reached_home(self, box: Box, shape, elapsed: float, now: float) -> bool:
+        if elapsed < MIN_APPROACH_S or not self._home_close_enough(box, shape):
             self._dwell_t = None
             return False
         if self._dwell_t is None:

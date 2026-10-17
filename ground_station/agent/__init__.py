@@ -1,12 +1,8 @@
-"""Persistent Droid session state backed by a Chalk Volume."""
-from ground_station.agent.store import (
-    append_decision,
-    decision_log,
-    get_last_survey,
-    load_mission_state,
-    save_mission_state,
-    set_last_survey,
-)
+"""Embedded Droid controller and optional Chalk-backed persistence.
+
+Do not load cloud credentials/dependencies just to import the local controller.
+The original state-helper exports remain available on demand.
+"""
 
 __all__ = [
     "append_decision",
@@ -16,3 +12,11 @@ __all__ = [
     "save_mission_state",
     "set_last_survey",
 ]
+
+
+def __getattr__(name: str):
+    if name in __all__:
+        from ground_station.agent import store
+
+        return getattr(store, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

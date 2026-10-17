@@ -10,26 +10,26 @@ This table shows what code exists and what's wired together:
 
 | Module | What exists | Current integration boundary |
 |--------|-------------|------------------------------|
-| [Ground-station mission](#ground-station-mission-and-drone-interface) | Tello/webcam adapter, survey state machine, local control loop, photo capture | Connected to local detection and optional Grok Voice; not wired to Chalk, Daytona, or Droid |
-| [Wheat AprilTag detection](#wheat-head-and-apriltag-detection) | Live detection via ONNX image detector, training export scripts | Finds target bounding boxes; does not produce crop-health scores |
-| [Grok Voice](#grok-voice) | Realtime audio session start, status, abort tools | Calls local mission state machine, not an embedded Droid session |
-| [Chalk feature evaluation](#chalk-feature-evaluation) | Feature resolvers, query helpers, named query, monitoring definition, labeled eval cases | Standalone helpers; mission does not invoke them |
+| [Ground-station mission](#ground-station-mission-and-drone-interface) | Tello/webcam adapter, local control, capture and analysis hold | Default Droid control; explicit legacy voice/auto path |
+| [Wheat AprilTag detection](#wheat-head-and-apriltag-detection) | Live `.pt`/AprilTag detection and separate ONNX image detector, training/export scripts | Finds target bounding boxes; does not produce crop-health scores |
+| [Grok Voice](#grok-voice) | Realtime audio session start, status, abort tools | Starts route to persistent Droid; stops bypass cloud |
+| [Chalk feature evaluation](#chalk-feature-evaluation) | Resolvers and validated named query | Invoked per analysis with `--chalk`; local thresholds otherwise |
 | [Chalk mission state](#chalk-volume-backed-mission-state) | Volume-backed snapshots, decision log, latest-survey cache | Storage helpers exist but not called by mission |
 | [Daytona sandbox](#daytona-sandbox-execution) | SDK wrapper and mission/runtime coordination | Standalone smoke test; no mission or Droid integration yet |
 | [Grok team coordination](#grok-team-coordination) | CLI queue/history, read-only bot-branch publisher | Independent developer coordination service; not mission-critical |
-| [Photon](#how-droid-is-used-at-runtime) | Runtime session placeholder, registered tools | Photo-to-alert adapter not implemented |
+| [Droid and Photon](#how-droid-is-used-at-runtime) | Persistent SDK, Grok image analysis, history, restricted tools and alerts | Connected photo-analysis-decision loop; no incoming Photon commands |
 | [Audio signaling](#standalone-audio-signaling) | Speaker-to-microphone ggwave text sender/receiver | Independent utilities; not connected to survey mission |
 
-**Key insight**: Each component is functionally complete **in isolation**. The end-to-end pipeline (photo → Chalk → Droid → Daytona → Photon) is not yet wired.
+**Key insight**: The default runtime connects image analysis to persistent Droid decisions and controlled actions/alerts. Daytona and Chalk Volume remain separate; visual health estimates are not verified diagnoses.
 
 ## Current Runtime Flow
 
-The only implemented mission path today is:
+The default Droid path is:
 
 ```text
-Operator speech or explicit --auto startup
+Operator speech or initial SDK instruction
         ↓
-Grok Voice tool call (if voice enabled)
+Persistent Factory Droid tools and host approval
         ↓
 Local SurveyMission state machine
         ↓
@@ -37,9 +37,13 @@ Webcam mock or Tello camera
         ↓
 YOLO wheat-head or AprilTag detection
         ↓
-Local steering, photo capture, return/land phases
+Local steering, photo capture, fixed-deadline hover
         ↓
-Photo path recorded in mission memory
+Grok Responses image analysis → validated score/summary
+        ↓
+Local survey history + optional Chalk features → same Droid session
+        ↓
+Reimage / host-formatted Photon alert / return home / land
 ```
 
 Photo handling currently:
@@ -47,12 +51,11 @@ Photo handling currently:
 - Records its path in the mission log
 - Prints the path to stdout
 
+The host sends image bytes to xAI, then validated analysis and features to Droid. Droid does not receive raw photos or choose image paths. Photon receives host-formatted text, not image attachments. Explicit `--controller voice` retains the legacy direct voice/auto path without this analysis loop.
+
 It does **not**:
-- Automatically request Grok image understanding
-- Evaluate Chalk features
 - Save mission state to Chalk
 - Run Daytona scripts
-- Send Photon alerts
 
 ## Ground-station mission and drone interface
 
@@ -126,7 +129,7 @@ Uses OpenCV's AprilTag dictionaries. Tags can serve as both survey targets (whea
 
 **Detection is not crop-health analysis.**
 
-Bounding boxes and head counts do not supply the `health_score` expected by Chalk's feature evaluators. The PRD's Grok image-understanding step (converting a photo to health confidence) is still unimplemented. You must define the result schema before wiring this to Chalk.
+Bounding boxes and head counts do not supply health scores. The separate [image analyzer](ground_station/agent/analysis.py) sends the captured JPEG/PNG to Grok Responses and validates a finite score in `[0, 1]` plus a bounded summary. The [pipeline](ground_station/agent/pipeline.py) binds it to a host capture and provides it to Droid and optional Chalk.
 
 ## Grok Voice
 
@@ -154,8 +157,8 @@ Grok interprets spoken requests, transcribes them, and decides which tool to cal
 
 ### Limitations
 
-- The bridge is not a full Droid session. It's a thin tool-calling interface.
-- Photos are not automatically sent to Grok for analysis; you must implement that separately.
+- The voice bridge is an input adapter, not the Droid session itself.
+- In default mode, captured photos are analyzed through a separate Grok Responses call.
 - The mission's internal state machine drives flight, not Grok's reasoning.
 
 ## Chalk Feature Evaluation
@@ -321,24 +324,19 @@ A deterministic publisher can check committed changes in owned worktrees and pus
 
 ## How Droid Is Used at Runtime
 
-**Current status: Embedded runtime described in the PRD is not yet implemented.**
+The embedded mission controller is implemented in [agent/controller.py](ground_station/agent/controller.py), with a mock-first [session launcher](ground_station/agent/session.py). See the [SDK runtime guide](ground_station/agent/README.md) for commands, limits, local approval, environment configuration, and tests.
 
-Factory's Droid is currently used as the team's coding interface only. The `ground_station/agent/` package contains Chalk-backed state helpers but not a session launcher. There is no runnable `ground_station/agent/session.py`.
+One official `droid-sdk` session handles initial instructions, voice starts and validated image analyses. Four tools read status, request bounded commands, read survey context/history, or queue the current analysis alert. The camera/RC loop remains separate from model latency. After capture it hovers with a fixed 90-second deadline; reimages never extend it. Real starts/photos require local approval; stop/failure latches cannot be cleared by the model. Observations and decisions persist locally in ignored `data/surveys.sqlite3`.
 
-### Intended Flow (Not Yet Implemented)
+[Photon notifications](ground_station/photon.py) include fixed status messages and host-formatted validated analysis text sent to one verified private human/agent direct space. Droid's alert tool accepts no recipients, paths, credentials, or arbitrary text. Configured mock runs send real iMessages marked `MOCK`; use `--no-photon` for local-only runs.
 
-1. Analyze captured photo into a validated crop-health result.
-2. Evaluate decision features in Chalk and load mission context.
-3. Feed analysis and context into an embedded Droid session.
-4. Droid generates scripts or action recommendations.
-5. Generated scripts run inside Daytona, not on the host.
-6. Validate proposed actions before local device control or Photon alert.
-7. Save mission state and decisions; add feature persistence separately for historical analysis.
+`python -m ground_station.agent.session --check-sdk` verifies the effective tool boundary without opening hardware or running inference. `python -m ground_station.photon --check` checks the configured assignment and routing without sending a message.
 
 ### Current Gaps
 
-- No ground-station Photon adapter for photo/analysis alerts or incoming mission commands.
-- Credential placeholders do not implement the adapter.
+- Live Grok image assessments are not validated agronomic diagnoses; the authenticated SDK smoke test simulates vision and Photon.
+- Chalk querying requires `--chalk` and a deployed named query. Chalk Volume storage, Daytona execution, and automatic flight resumption remain separate.
+- No Photon image attachments or incoming mission commands. Notification delivery is best effort, not a durable outbox.
 - The PRD describes demo criteria and acceptance targets, not a completed demo checklist.
 
 ## Standalone Audio Signaling
@@ -367,17 +365,19 @@ Root requirements do not pin Chalk or Daytona SDK versions; verify compatibility
 | Chalk helpers | `CHALK_CLIENT_ID`, `CHALK_CLIENT_SECRET`, real `CHALK_ENVIRONMENT` ID, `CHALK_STATE_VOLUME` name |
 | Daytona | `DAYTONA_API_KEY`, API URL, target environment |
 | Grok team CLI | Local Grok CLI installed; see [grok-team/README.md](grok-team/README.md) |
+| Factory Droid controller | Authenticated `droid` CLI or `FACTORY_API_KEY`; pinned `droid-sdk[mcp]`; xAI key for vision unless explicit mock fixture |
+| Photon system notifications | Private Beta assignment and existing direct space; see the [runtime guide](ground_station/agent/README.md) |
 
 Setting environment variables does not enable missing integrations; it just makes them available if called.
 
 ### Quickstart: Webcam Mock
 
 ```bash
-python demo.py --mock --target tag --target-tag 12 --home-tag 12 --no-voice --auto
+python demo.py --controller voice --mock --target tag --target-tag 12 --home-tag 12 --no-voice --auto --no-photon
 ```
 
 Needs:
-- Python 3.9+
+- Python 3.10+
 - OpenCV
 - A printed AprilTag (family `36h11`, ID 12)
 
@@ -402,14 +402,14 @@ Say "start survey" when prompted.
 
 ### Real Tello (Caution)
 
-Remove `--mock`:
+Enable hardware explicitly and approve the pending request with local `y`:
 
 ```bash
-python demo.py --target tag --target-tag 12 --home-tag 12 --no-voice --auto
+python demo.py --allow-real-flight --target tag --target-tag 12 --home-tag 12 --no-voice
 ```
 
 **Requirements**:
-- Tello connected to laptop Wi-Fi
+- Tello connected through the USB Wi-Fi dongle; laptop Wi-Fi keeps internet
 - Battery charged
 - Clear flying space (5m+ radius)
 - Visible AprilTag
@@ -420,14 +420,16 @@ python demo.py --target tag --target-tag 12 --home-tag 12 --no-voice --auto
 
 | Command | Effect | Prerequisites |
 |---------|----|---|
-| `python demo.py --mock --target tag --target-tag 12 --home-tag 12 --no-voice --auto` | Local mission on webcam | OpenCV, printed AprilTag |
+| `python demo.py --controller voice --mock --target tag --target-tag 12 --home-tag 12 --no-voice --auto --no-photon` | Legacy local mission on webcam | OpenCV, printed AprilTag |
+| `python -m ground_station.agent.session --no-voice --fake-analysis --no-photon` | SDK-driven webcam loop, simulated assessment | Factory authentication, OpenCV |
+| `python tests/live_droid_pipeline.py` | Headless real SDK decision/alert integration, simulated providers | Factory authentication; no hardware or real messaging |
 | `python wheat_detection/detect.py path/to/field.png` | ONNX image inference | ONNX dependencies, input image |
 | `python wheat_detection/predict.py path/to/field.png --device cpu` | Ultralytics inference | `.pt` checkpoint |
 | `python -m ground_station.chalk_eval` | Authenticated cloud Chalk queries | Chalk credentials, deployed features |
 | `python -m ground_station.chalk_quality` | Named-query smoke call on `schedtest` | Chalk credentials |
 | `python -m ground_station.sandbox.daytona_runner` | Creates, exercises, deletes Daytona sandbox | Daytona credentials (provisioning real resources) |
 
-These exercise individual components. **None launches the full end-to-end loop.** Cloud smoke calls are not prerequisites for reading or running the local webcam demo.
+The SDK launcher runs the connected runtime; the headless test proves authenticated SDK decisions with simulated providers. Other commands exercise individual components. Cloud helper smoke calls are not prerequisites for the legacy local webcam demo.
 
 ## Repository Structure
 
@@ -437,7 +439,8 @@ audio_signaling/
 ├── drone_interface/
 │   └── tello_client.py                  # Tello adapter
 ├── ground_station/
-│   ├── voice_mission.py                 # Voice-driven mission
+│   ├── voice_mission.py                 # Voice or SDK mission/control loop
+│   ├── photon.py                        # Host-owned system notifications
 │   ├── mission.py                       # State machine and phases
 │   ├── control.py                       # Steering calculations
 │   ├── voice_grok.py                    # Grok Voice bridge
@@ -449,6 +452,11 @@ audio_signaling/
 │   ├── chalk_quality.py                 # Named-query smoke test
 │   ├── chalk_eval.py                    # Labeled eval
 │   ├── agent/
+│   │   ├── session.py                   # Mock-first SDK entrypoint
+│   │   ├── controller.py                # Persistent session and restricted MCP tools
+│   │   ├── driver.py                    # Host approval and bounded mission commands
+│   │   ├── worker.py                    # Off-thread SDK lifecycle
+│   │   ├── README.md                    # Runtime and Photon setup guide
 │   │   ├── store.py                     # Chalk Volume state helpers
 │   │   └── NOTES.md                     # Storage investigation caveats
 │   └── sandbox/

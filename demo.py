@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Demo entry: Grok on laptop Wi-Fi, Tello on USB Wi-Fi dongle."""
+"""Demo entry: Factory Droid decides; laptop RC + dongle 7 → TELLO-7.
+
+Default: --controller droid. Built-in Wi-Fi stays on internet (Factory/Grok);
+USB stick from config/dongles.json number 7 joins SSID TELLO-7 via nmcli.
+"""
 
 from __future__ import annotations
 
