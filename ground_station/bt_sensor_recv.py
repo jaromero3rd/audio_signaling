@@ -65,9 +65,12 @@ async def run(log_path: Path | None, timeout: float) -> int:
             except json.JSONDecodeError:
                 print(f"[raw] {text}")
                 continue
+            light = sample.get("light")
+            light_s = f"{light}/100" if light is not None else f"raw={sample.get('light_raw')}"
             print(
                 f"T={sample.get('temp_c')}C  RH={sample.get('humidity_pct')}%  "
-                f"light_raw={sample.get('light_raw')}  ok={sample.get('ok')}"
+                f"light={light_s} ({sample.get('light_band', '?')})  "
+                f"raw={sample.get('light_raw')}  ok={sample.get('ok')}"
             )
             if log_path is not None:
                 log_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,78 +1,97 @@
-"""LDR calibration — absolute bands + slow auto-range (no forced 1.0=scorch).
+"""Map LDR ADC -> light 1..100.
 
-We treat the ADC as a rough sunlight meter:
-  - Absolute raw bands → human labels (dark / indoor / outdoor / harsh)
-  - Session min–max auto-range → a relative 0–100% so indoor demos still move
+  1   = dark
+  50  = room at app start
+ 100  = super bright
+
+Your setup: brighter light raises raw ADC (5V—LDR—A0—100k—GND).
+So we do NOT invert. If levels go the wrong way, set INVERT = True.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+ADC_MAX = 1023.0
+
+# False: higher raw = brighter (typical 5V-LDR-A0-resistor-GND)
+# True:  higher raw = darker  (5V-resistor-A0-LDR-GND)
+INVERT = True
+
 
 @dataclass
 class LightReading:
     raw: int
-    percent: float  # 0–100 relative to what this session has seen
-    band: str  # dark | indoor | bright_indoor | outdoor | harsh
-    note: str
-
-
-# Absolute raw bands (10-bit). Tune only if your divider/resistor differ a lot.
-# These are starting points for: 5V—LDR—A0—10k—GND
-BANDS = (
-    (180, "dark", "little or no light"),
-    (420, "indoor", "typical indoor / shade"),
-    (700, "bright_indoor", "bright room or overcast outdoor"),
-    (900, "outdoor", "useful daylight for crops"),
-    (1024, "harsh", "very strong sun — scorch / rapid drying risk"),
-)
+    level: int  # 1..100
+    band: str
 
 
 class LightCalibrator:
-    def __init__(self) -> None:
-        self._min: float | None = None
-        self._max: float | None = None
-        self._n = 0
+    def __init__(self, room_level: int = 50) -> None:
+        self.room_level = max(1, min(99, room_level))
+        self.invert = INVERT
+        self._room: float | None = None
+        self._min_b: float | None = None
+        self._max_b: float | None = None
+        self._boot_n = 0
+        self._boot_sum = 0.0
+        self._boot_needed = 8  # ~fast samples at high rate
+
+    def _brightness(self, raw: float) -> float:
+        raw = max(0.0, min(ADC_MAX, raw))
+        return (ADC_MAX - raw) if self.invert else raw
 
     def update(self, raw_adc: float) -> LightReading:
-        raw = int(max(0, min(1023, float(raw_adc))))
-        self._n += 1
+        raw = float(max(0.0, min(ADC_MAX, raw_adc)))
+        b = self._brightness(raw)
 
-        # Expand session range slowly so a brief shadow doesn't dominate.
-        if self._min is None:
-            self._min = float(raw)
-            self._max = float(raw)
+        # Boot: this room = 50
+        if self._room is None:
+            self._boot_sum += b
+            self._boot_n += 1
+            if self._boot_n < self._boot_needed:
+                return LightReading(raw=int(raw), level=self.room_level, band="room")
+            self._room = self._boot_sum / self._boot_n
+            self._min_b = self._room
+            self._max_b = self._room
+
+        assert self._room is not None
+        # Track extremes so 1 and 100 stretch to what you've actually seen
+        self._min_b = min(self._min_b or b, b)
+        self._max_b = max(self._max_b or b, b)
+
+        room = self._room
+        dark = min(self._min_b, room - 20)
+        bright = max(self._max_b, room + 20)
+
+        # Guarantee usable spans even before you've covered / lit the sensor
+        if room - dark < 15:
+            dark = max(0.0, room - 80)
+        if bright - room < 15:
+            bright = min(ADC_MAX, room + 80)
+
+        if b <= room:
+            # darker than room -> 1 .. 50
+            span = max(1.0, room - dark)
+            t = (b - dark) / span
+            level = 1.0 + t * (self.room_level - 1.0)
         else:
-            self._min = min(self._min, float(raw))
-            self._max = max(self._max, float(raw))
-            # Keep a usable span even if values barely move
-            if self._max - self._min < 40:
-                mid = 0.5 * (self._min + self._max)
-                self._min = mid - 20
-                self._max = mid + 20
+            # brighter than room -> 50 .. 100
+            span = max(1.0, bright - room)
+            t = (b - room) / span
+            level = self.room_level + t * (100.0 - self.room_level)
 
-        span = max(1.0, (self._max or 1) - (self._min or 0))
-        percent = 100.0 * (raw - (self._min or 0)) / span
-        percent = max(0.0, min(100.0, percent))
+        level_i = int(round(max(1.0, min(100.0, level))))
+        return LightReading(raw=int(raw), level=level_i, band=self._band(level_i))
 
-        band = "harsh"
-        note = "very strong sun — scorch / rapid drying risk"
-        for limit, name, desc in BANDS:
-            if raw < limit:
-                band = name
-                note = desc
-                break
-
-        return LightReading(raw=raw, percent=percent, band=band, note=note)
-
-
-def light_for_analyze(reading: LightReading) -> float:
-    """Map band → 0..1 stress-oriented light factor for crop_health.analyze()."""
-    return {
-        "dark": 0.08,
-        "indoor": 0.28,
-        "bright_indoor": 0.48,
-        "outdoor": 0.72,
-        "harsh": 0.95,
-    }.get(reading.band, 0.5)
+    @staticmethod
+    def _band(level: int) -> str:
+        if level <= 15:
+            return "dark"
+        if level <= 40:
+            return "dim"
+        if level <= 60:
+            return "room"
+        if level <= 85:
+            return "bright"
+        return "super_bright"

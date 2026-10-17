@@ -1,9 +1,8 @@
 /*
- * Sensor read-only — Arduino UNO Q MCU
- * DHT11: S->D2  U->5V  G->GND
- * LDR:   5V - LDR - A0 - 10k - GND
+ * Sensor read-only — Arduino UNO Q MCU (fast stream + Serial Monitor)
  *
- * No analysis here. Linux forwards values over Bluetooth.
+ * DHT11:  S->D2  U->5V  G->GND
+ * LDR:    5V — LDR — A0 — 100k — GND
  */
 
 #include <Arduino.h>
@@ -14,19 +13,49 @@
 #define DHT_TYPE DHT11
 #define LDR_PIN A0
 
+#define LOOP_MS 50UL
+#define DHT_MIN_MS 1000UL
+
 DHT dht(DHT_PIN, DHT_TYPE);
 
 float last_temp_c = NAN;
 float last_humidity = NAN;
 int last_light_raw = 0;
+unsigned long last_dht_ms = 0;
+bool dht_ok = false;
+uint32_t sample_n = 0;
 
 static int read_light_raw() {
   long sum = 0;
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 4; i++) {
     sum += analogRead(LDR_PIN);
-    delay(2);
   }
-  return (int)(sum / 8);
+  return (int)(sum / 4);
+}
+
+static void serial_print_sample(int raw) {
+  // App Lab Monitor + classic Serial (both, so Serial Monitor shows data)
+  sample_n++;
+  String line = "#" + String(sample_n);
+  line += "  T=";
+  if (dht_ok && !isnan(last_temp_c)) {
+    line += String(last_temp_c, 1);
+    line += "C";
+  } else {
+    line += "----";
+  }
+  line += "  RH=";
+  if (dht_ok && !isnan(last_humidity)) {
+    line += String(last_humidity, 0);
+    line += "%";
+  } else {
+    line += "----";
+  }
+  line += "  light_raw=";
+  line += String(raw);
+
+  Monitor.println(line);
+  Serial.println(line);
 }
 
 String get_reading(String /*unused*/) {
@@ -44,32 +73,44 @@ String get_reading(String /*unused*/) {
 void setup() {
   Bridge.begin();
   Monitor.begin();
+  Serial.begin(115200);
+
   pinMode(LDR_PIN, INPUT);
   dht.begin();
-  delay(2000);
+  delay(1500);
+
   Bridge.provide("get_reading", get_reading);
-  Monitor.println("Sensors ready -> Bluetooth on Linux");
+
+  Monitor.println("Serial Monitor: T / RH / light_raw  (~20 Hz light)");
+  Serial.println("Serial Monitor: T / RH / light_raw  (~20 Hz light)");
 }
 
 void loop() {
-  float h = dht.readHumidity();
-  float t = dht.readTemperature();
+  unsigned long now = millis();
   int raw = read_light_raw();
   last_light_raw = raw;
 
-  if (isnan(h) || isnan(t)) {
-    Monitor.println("FAIL DHT11");
-    Bridge.notify("on_sample", false, 0.0, 0.0, (float)raw);
-  } else {
-    last_temp_c = t;
-    last_humidity = h;
-    Monitor.print("T=");
-    Monitor.print(t, 1);
-    Monitor.print("C RH=");
-    Monitor.print(h, 0);
-    Monitor.print("% raw=");
-    Monitor.println(raw);
-    Bridge.notify("on_sample", true, t, h, (float)raw);
+  if (now - last_dht_ms >= DHT_MIN_MS || last_dht_ms == 0) {
+    float h = dht.readHumidity();
+    float t = dht.readTemperature();
+    last_dht_ms = now;
+    if (!isnan(h) && !isnan(t)) {
+      last_temp_c = t;
+      last_humidity = h;
+      dht_ok = true;
+    } else {
+      dht_ok = false;
+    }
   }
-  delay(2000);
+
+  serial_print_sample(raw);
+
+  Bridge.notify(
+      "on_sample",
+      dht_ok,
+      isnan(last_temp_c) ? 0.0 : last_temp_c,
+      isnan(last_humidity) ? 0.0 : last_humidity,
+      (float)raw);
+
+  delay(LOOP_MS);
 }

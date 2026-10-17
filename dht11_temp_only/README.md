@@ -1,40 +1,37 @@
-# DHT11 + LDR → Bluetooth → ground-station computer
+# DHT11 + LDR → Bluetooth → ground-station laptop
 
-The UNO Q only **reads** sensors and **sends** raw values.  
-No crop-health processing on the board.
+UNO Q only reads sensors and sends them. No crop analysis on the board.
 
-**Important:** the receiver is the **ground-station laptop** (a different machine
-from whatever you use to flash/dev). That PC must have Bluetooth on and run
-`bt_sensor_recv` while near the UNO Q.
+## DHT11
+| Pin | UNO Q |
+|-----|--------|
+| S | D2 |
+| U | 5V |
+| G | GND |
+
+## Photoresistor wiring
 
 ```
-[UNO Q + DHT11 + LDR] --BLE--> [ground-station laptop]
-                                      ├─ sensor log / crop analysis (later)
-                                      ├─ Tello / AprilTag / Grok Voice
-                                      └─ NOT required to be the App Lab PC
+5V ---- LDR ----+---- A0
+                |
+             [100kΩ]
+                |
+               GND
 ```
 
-## Wiring
-| Sensor | Pins |
-|--------|------|
-| DHT11 | S→D2, U→5V, G→GND |
-| LDR | 5V—LDR—A0—10k—GND |
+Brighter light → higher `light_raw`. Software maps to **`light` 1–100**:
+- **1** = dark  
+- **50** = room when the app starts  
+- **100** = super bright  
 
-## 1) Dev / App Lab PC (can be this machine)
-1. Import `dht11_temp_only_import.zip` in App Lab  
-2. Run on the UNO Q (advertises **AgriDrone-UNOQ**)
+If a flashlight makes `light` go *down*, set `INVERT = True` in `python/light_cal.py`.
 
-## 2) Ground-station laptop (the other computer)
+Stream rate: light ~**20 Hz**; DHT11 refreshes about once per second.
+
+## Run
+1. App Lab: import/run this app on the UNO Q (`AgriDrone-UNOQ`)
+2. Ground-station laptop:
 ```bash
-cd audio_signaling
 pip install bleak
 python -m ground_station.bt_sensor_recv
 ```
-
-You should see lines like:
-```
-T=24.0C  RH=45%  light_raw=612  ok=True
-```
-
-Requirements on that laptop: Bluetooth enabled, close enough to the UNO Q,
-same repo (or at least `ground_station/bt_sensor_recv.py`).
