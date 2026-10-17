@@ -38,7 +38,10 @@ def send_photon_alert(message: str, photo_path: str | None = None) -> dict:
     if photo_path:
         cmd += ["--image", str(Path(photo_path).resolve())]
 
-    res = subprocess.run(cmd, cwd=AGENT_DIR, capture_output=True, text=True, timeout=90)
+    try:
+        res = subprocess.run(cmd, cwd=AGENT_DIR, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"photon alert timed out: {(e.stderr or '').strip()}")
     if res.returncode != 0:
         raise RuntimeError(f"photon alert failed: {res.stderr.strip()}")
     return {"stdout": res.stdout.strip()}

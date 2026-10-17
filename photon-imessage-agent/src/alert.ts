@@ -10,6 +10,7 @@
  * override, or run `bun start` and have the sender text the agent once first.
  */
 import { ApiError, Photon } from "@photon-ai/api";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, extname } from "node:path";
 import { spaceContext } from "./checkpoint";
@@ -47,7 +48,7 @@ async function upload(photon: Photon, projectId: string, imagePath: string): Pro
     headers: {
       "content-length": String(body.size),
       "content-type": `multipart/related; boundary=${boundary}`,
-      "idempotency-key": `agridrone-att:${basename(imagePath)}:${bytes.length}:${Date.now()}`,
+      "idempotency-key": `agridrone-att:${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}`,
     },
     body,
   });
@@ -65,7 +66,7 @@ async function send(photon: Photon, projectId: string, spaceId: string, agentId:
     headers: { "idempotency-key": idem },
     body: { spaceId, senderId: agentId, content },
   });
-  if (typeof sent.id !== "string") throw new SetupError("Photon accepted the alert but returned no message ID.");
+  if (typeof sent.id !== "string" || !sent.id) throw new SetupError("Photon accepted the alert but returned no message ID.");
   return sent.id;
 }
 
