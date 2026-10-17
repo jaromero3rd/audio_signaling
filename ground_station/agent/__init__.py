@@ -1,4 +1,5 @@
 """Persistent Droid session state backed by a Chalk Volume."""
+from ground_station.agent.session import DroidSession
 from ground_station.agent.store import (
     append_decision,
     decision_log,
@@ -9,6 +10,7 @@ from ground_station.agent.store import (
 )
 
 __all__ = [
+    "DroidSession",
     "append_decision",
     "decision_log",
     "get_last_survey",

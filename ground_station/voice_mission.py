@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from drone_interface.tello_client import MockDrone, TelloDrone
+from ground_station.agent import DroidSession
 from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
 from ground_station.mission import CLOSE_FEET_DEFAULT, FRAME_STALE_S, Gains, TAG_SIZE_M_DEFAULT, SurveyMission
@@ -174,6 +175,9 @@ def main() -> int:
         on_phase=on_phase,
     )
 
+    droid = DroidSession()
+    print("Droid session initialized.")
+
     drone = MockDrone(args.camera) if args.mock else TelloDrone(iface=args.tello_iface)
     drone.connect()
     drone.stream_on()
@@ -288,6 +292,7 @@ def main() -> int:
             except Exception:
                 drone.emergency()
         drone.close()
+        droid.close()
         cv2.destroyAllWindows()
     return 0
 
