@@ -4,3 +4,6 @@ sounddevice
 opencv-python>=4.8
 djitellopy>=2.5
 ultralytics>=8.0
+python-dotenv
+chalkpy
+daytona
