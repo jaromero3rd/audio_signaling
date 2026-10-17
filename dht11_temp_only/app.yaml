@@ -1,7 +1,8 @@
-name: DHT11 BT Sensors
+name: DHT11 Sensors
 icon: 📡
 description: >-
-  Read DHT11 + photoresistor on the UNO Q and send raw readings to a computer
-  over Bluetooth. No on-board crop analysis.
-ports: []
+  Read DHT11 + photoresistor and stream JSON to a laptop over TCP :9123.
+  For Bluetooth, run python/host_bt_relay.py on the UNO Q Debian host (adb shell).
+ports:
+  - 9123
 bricks: []

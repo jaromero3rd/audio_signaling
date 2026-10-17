@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """Receive UNO Q sensor JSON on the ground-station computer.
 
-Two ways (pick one):
+  A) TCP (recommended — App Lab usually blocks on-board BLE):
+       python -m ground_station.bt_sensor_recv --tcp 192.168.x.x:9123
 
-  A) Bluetooth LE (no pairing COM port needed):
+  B) Bluetooth LE (needs host_bt_relay.py on the UNO Q Debian host):
        pip install bleak
        python -m ground_station.bt_sensor_recv
-       python -m ground_station.bt_sensor_recv --scan   # list nearby BLE devices
+       python -m ground_station.bt_sensor_recv --scan
 
-  B) Classic Bluetooth Serial (after pairing AgriDrone-UNOQ / UNO Q):
-       pip install pyserial
+  C) Classic Bluetooth Serial:
        python -m ground_station.bt_sensor_recv --com COM5
-
-The Arduino only gathers sensors and sends JSON lines over Bluetooth.
 """
 
 from __future__ import annotations
@@ -203,10 +201,43 @@ def run_com(port: str, log_path: Path | None, baud: int) -> int:
                 _handle_line(line, log_path)
 
 
+def run_tcp(target: str, log_path: Path | None) -> int:
+    """Connect to App Lab TCP stream, e.g. 192.168.1.50:9123"""
+    import socket
+
+    if ":" in target:
+        host, _, port_s = target.rpartition(":")
+        port = int(port_s)
+    else:
+        host, port = target, 9123
+
+    print(f"Connecting TCP to {host}:{port} ...")
+    with socket.create_connection((host, port), timeout=10) as sock:
+        print("Connected — streaming (Ctrl+C to stop)", flush=True)
+        sock.settimeout(1.0)
+        buf = ""
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                print("Connection closed", flush=True)
+                return 0
+            buf += chunk.decode("utf-8", errors="replace")
+            while "\n" in buf:
+                line, _, buf = buf.partition("\n")
+                _handle_line(line, log_path)
+
+
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Receive UNO Q Bluetooth sensor stream")
+    p = argparse.ArgumentParser(description="Receive UNO Q Bluetooth/TCP sensor stream")
     p.add_argument("--timeout", type=float, default=25.0, help="BLE scan timeout")
     p.add_argument("--com", help="Classic BT serial port, e.g. COM5 (Windows)")
+    p.add_argument(
+        "--tcp",
+        help="TCP to App Lab stream, e.g. 192.168.1.50:9123 (works when BLE is blocked)",
+    )
     p.add_argument("--baud", type=int, default=9600)
     p.add_argument("--log", type=Path, default=None)
     p.add_argument("--no-log", action="store_true")
@@ -221,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.scan:
             return asyncio.run(run_scan(args.timeout))
+        if args.tcp:
+            return run_tcp(args.tcp, log_path)
         if args.com:
             return run_com(args.com, log_path, args.baud)
         return asyncio.run(run_ble(log_path, args.timeout))

@@ -1,200 +1,181 @@
-"""Send sensor JSON from the UNO Q to another computer over Bluetooth.
+"""Sensor outbound links from the App Lab Python container.
 
-Two paths (both start; whichever the laptop uses will work):
-  1) BLE peripheral "AgriDrone-UNOQ" (notify) — laptop: bleak
-  2) Classic RFCOMM channel 1 — laptop pairs then opens the COM port
+IMPORTANT (Arduino UNO Q / App Lab):
+  The App container cannot use BlueZ. Do NOT run bless here — it always fails
+  with Errno 2 / missing D-Bus. Bluetooth is done by host_bt_relay.py on the
+  Debian host (see README). This module only:
 
-Payload is one JSON object per line.
+    1) TCP server :9123  — laptop connects with --tcp <ip>:9123
+    2) TCP client :9124  — forwards JSON to host_bt_relay.py (real BLE)
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import socket
-import subprocess
 import threading
+import time
 from typing import Any
 
-SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
-TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
-RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 DEVICE_NAME = "AgriDrone-UNOQ"
-RFCOMM_CHANNEL = 1
+TCP_PORT = 9123
+HOST_RELAY_PORT = 9124
+HOST_RELAY_CANDIDATES = (
+    "127.0.0.1",
+    "172.17.0.1",   # common Docker bridge gateway
+    "172.18.0.1",
+    "172.10.0.1",   # mentioned on Arduino forums
+)
 
 
-def _run_bt_cmd(args: list[str], timeout: float = 8.0) -> str:
+def _local_ips() -> list[str]:
+    ips: list[str] = []
     try:
-        r = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        out = (r.stdout or "") + (r.stderr or "")
-        return out.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        return f"(cmd failed: {exc})"
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    # Also try UDP trick for the default outbound interface
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and not ip.startswith("127.") and ip not in ips:
+            ips.insert(0, ip)
+    except OSError:
+        pass
+    return ips
 
 
-def ensure_bluetooth_ready() -> None:
-    """Power on the UNO Q Bluetooth radio and make it discoverable.
+class SensorStream:
+    """TCP to laptop + optional forward to host BLE relay."""
 
-    Without this, Windows / bleak often never see AgriDrone-UNOQ.
-    """
-    print("[bt] ensuring Bluetooth adapter is ON + discoverable...", flush=True)
-
-    for cmd in (
-        ["bluetoothctl", "power", "on"],
-        ["bluetoothctl", "pairable", "on"],
-        ["bluetoothctl", "discoverable", "on"],
-        ["bluetoothctl", "agent", "on"],
-        ["bluetoothctl", "default-agent"],
-    ):
-        out = _run_bt_cmd(cmd)
-        if out:
-            print(f"[bt] {' '.join(cmd)} -> {out}", flush=True)
-
-    hci = _run_bt_cmd(["hciconfig", "hci0", "up"])
-    if hci and "failed" not in hci.lower():
-        print(f"[bt] hciconfig hci0 up -> {hci or 'ok'}", flush=True)
-    _run_bt_cmd(["hciconfig", "hci0", "piscan"])
-
-    show = _run_bt_cmd(["bluetoothctl", "show"])
-    if show:
-        for line in show.splitlines():
-            low = line.lower()
-            if any(k in low for k in ("powered", "discoverable", "pairable", "name", "alias")):
-                print(f"[bt] {line.strip()}", flush=True)
-
-
-class BtSensorStream:
     def __init__(self) -> None:
-        self._ble_loop: asyncio.AbstractEventLoop | None = None
-        self._ble_server: Any = None
-        self._ble_error: str | None = None
-        self._rfcomm_clients: list[socket.socket] = []
-        self._rfcomm_lock = threading.Lock()
-        self._ready = threading.Event()
+        self._tcp_clients: list[socket.socket] = []
+        self._tcp_lock = threading.Lock()
+        self._tcp_ok = False
+        self._tcp_error: str | None = None
+
+        self._host_sock: socket.socket | None = None
+        self._host_addr: str | None = None
+        self._host_lock = threading.Lock()
+
         self.sent = 0
-        self.mode = "starting"
+        self.ips = _local_ips()
 
     def start(self) -> None:
-        ensure_bluetooth_ready()
-        threading.Thread(target=self._ble_thread, name="bt-ble", daemon=True).start()
-        threading.Thread(target=self._rfcomm_thread, name="bt-rfcomm", daemon=True).start()
-        self._ready.wait(timeout=12)
+        threading.Thread(target=self._tcp_server, name="tcp-9123", daemon=True).start()
+        threading.Thread(target=self._host_client, name="host-9124", daemon=True).start()
+        time.sleep(0.5)
+        self._print_howto()
 
-    # --- BLE ---
-    def _ble_thread(self) -> None:
+    def _print_howto(self) -> None:
+        ip_hint = self.ips[0] if self.ips else "<UNOQ-IP>"
+        print("=" * 56, flush=True)
+        print("SENSORS OK — how to get data on your laptop:", flush=True)
+        print(f"  A) TCP (works now, no Bluetooth):", flush=True)
+        print(f"       python -m ground_station.bt_sensor_recv --tcp {ip_hint}:9123", flush=True)
+        if self.ips:
+            print(f"     board IPs: {', '.join(self.ips)}", flush=True)
+        print(f"  B) Real Bluetooth:", flush=True)
+        print(f"       1. On UNO Q host (adb shell): python3 host_bt_relay.py", flush=True)
+        print(f"       2. On laptop: python -m ground_station.bt_sensor_recv", flush=True)
+        print(f"          (device name: {DEVICE_NAME})", flush=True)
+        print("=" * 56, flush=True)
+
+    def status_line(self) -> str:
+        with self._tcp_lock:
+            n = len(self._tcp_clients)
+        tcp = f"TCP:{TCP_PORT} clients={n}" if self._tcp_ok else f"TCP-DOWN({self._tcp_error})"
+        with self._host_lock:
+            if self._host_addr:
+                ble = f"BLE-via-host({self._host_addr})"
+            else:
+                ble = "BLE-off (start host_bt_relay.py on board)"
+        return f"{tcp} | {ble}"
+
+    def _tcp_server(self) -> None:
         try:
-            asyncio.run(self._ble_main())
-        except Exception as exc:  # noqa: BLE001
-            self._ble_error = str(exc)
-            print(f"[bt-ble] failed: {exc}", flush=True)
-            self._ready.set()
-
-    async def _ble_main(self) -> None:
-        try:
-            from bless import BlessServer  # type: ignore
-            from bless.backends.characteristic import (  # type: ignore
-                GattCharacteristicsFlags as Flags,
-            )
-        except ImportError as exc:
-            self._ble_error = f"bless missing: {exc}"
-            print("[bt-ble] pip install bless  (on the UNO Q)", flush=True)
-            self._ready.set()
-            return
-
-        self._ble_loop = asyncio.get_running_loop()
-        server = BlessServer(name=DEVICE_NAME, loop=self._ble_loop)
-        self._ble_server = server
-        await server.add_new_service(SERVICE_UUID)
-        await server.add_new_characteristic(
-            SERVICE_UUID, TX_CHAR_UUID, Flags.read | Flags.notify, None, None
-        )
-        await server.add_new_characteristic(
-            SERVICE_UUID,
-            RX_CHAR_UUID,
-            Flags.write | Flags.write_without_response,
-            None,
-            None,
-        )
-        await server.start()
-        self.mode = "ble+rfcomm"
-        print(f"[bt-ble] advertising as {DEVICE_NAME}", flush=True)
-        # Re-assert discoverable after GATT server claims the adapter
-        ensure_bluetooth_ready()
-        self._ready.set()
-        while True:
-            await asyncio.sleep(3600)
-
-    # --- Classic RFCOMM ---
-    def _rfcomm_thread(self) -> None:
-        try:
-            srv = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind(("", RFCOMM_CHANNEL))
-            srv.listen(1)
-            print(
-                f"[bt-rfcomm] listening on channel {RFCOMM_CHANNEL} "
-                f"(pair phone/PC then open Serial/COM)",
-                flush=True,
-            )
-            self._ready.set()
+            srv.bind(("0.0.0.0", TCP_PORT))
+            srv.listen(4)
+            self._tcp_ok = True
+            print(f"[tcp] listening on 0.0.0.0:{TCP_PORT}", flush=True)
             while True:
                 client, addr = srv.accept()
-                print(f"[bt-rfcomm] client connected: {addr}", flush=True)
-                with self._rfcomm_lock:
-                    self._rfcomm_clients.append(client)
+                print(f"[tcp] laptop connected: {addr}", flush=True)
+                with self._tcp_lock:
+                    self._tcp_clients.append(client)
         except Exception as exc:  # noqa: BLE001
-            print(f"[bt-rfcomm] unavailable: {exc}", flush=True)
-            self._ready.set()
+            self._tcp_error = str(exc)
+            print(f"[tcp] failed: {exc}", flush=True)
+
+    def _host_client(self) -> None:
+        """Keep trying to reach host_bt_relay.py (real Bluetooth)."""
+        while True:
+            with self._host_lock:
+                alive = self._host_sock is not None
+            if alive:
+                time.sleep(3)
+                continue
+            for host in HOST_RELAY_CANDIDATES:
+                try:
+                    s = socket.create_connection((host, HOST_RELAY_PORT), timeout=1.0)
+                    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    with self._host_lock:
+                        self._host_sock = s
+                        self._host_addr = f"{host}:{HOST_RELAY_PORT}"
+                    print(
+                        f"[ble-host] connected — Bluetooth relay live at {self._host_addr}",
+                        flush=True,
+                    )
+                    break
+                except OSError:
+                    continue
+            else:
+                time.sleep(2)
 
     def send_sample(self, payload: dict[str, Any]) -> bool:
         line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
-        if len(line) > 180:
-            small = {
-                "ok": payload.get("ok"),
-                "temp_c": payload.get("temp_c"),
-                "humidity_pct": payload.get("humidity_pct"),
-                "light": payload.get("light"),
-                "light_raw": payload.get("light_raw"),
-                "ts": payload.get("ts"),
-            }
-            line = (json.dumps(small, separators=(",", ":")) + "\n").encode("utf-8")
-
         ok = False
-        ok = self._send_ble(line) or ok
-        ok = self._send_rfcomm(line) or ok
+        ok = self._fanout(self._tcp_clients, self._tcp_lock, line) or ok
+        ok = self._send_host(line) or ok
         if ok:
             self.sent += 1
         return ok
 
-    def _send_ble(self, line: bytes) -> bool:
-        if self._ble_error or self._ble_server is None or self._ble_loop is None:
+    def _send_host(self, line: bytes) -> bool:
+        with self._host_lock:
+            s = self._host_sock
+        if s is None:
             return False
-
-        async def _push() -> None:
-            self._ble_server.get_characteristic(TX_CHAR_UUID).value = line
-            self._ble_server.update_value(SERVICE_UUID, TX_CHAR_UUID)
-
         try:
-            fut = asyncio.run_coroutine_threadsafe(_push(), self._ble_loop)
-            fut.result(timeout=1.5)
+            s.sendall(line)
             return True
-        except Exception:
+        except OSError:
+            try:
+                s.close()
+            except OSError:
+                pass
+            with self._host_lock:
+                self._host_sock = None
+                self._host_addr = None
             return False
 
-    def _send_rfcomm(self, line: bytes) -> bool:
-        with self._rfcomm_lock:
-            clients = list(self._rfcomm_clients)
-        if not clients:
+    @staticmethod
+    def _fanout(clients: list[socket.socket], lock: threading.Lock, line: bytes) -> bool:
+        with lock:
+            current = list(clients)
+        if not current:
             return False
         alive: list[socket.socket] = []
         sent_any = False
-        for c in clients:
+        for c in current:
             try:
                 c.sendall(line)
                 alive.append(c)
@@ -204,10 +185,10 @@ class BtSensorStream:
                     c.close()
                 except OSError:
                     pass
-        with self._rfcomm_lock:
-            self._rfcomm_clients = alive
+        with lock:
+            clients[:] = alive
         return sent_any
 
-    @property
-    def ok(self) -> bool:
-        return self._ble_server is not None or True
+
+# Back-compat aliases used by older main.py imports
+BtSensorStream = SensorStream

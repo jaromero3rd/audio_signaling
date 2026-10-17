@@ -1,65 +1,74 @@
-# UNO Q sensors → Bluetooth → other computer
+# UNO Q sensors → laptop
 
-The Arduino only **reads** DHT11 + photoresistor and **sends JSON over Bluetooth**.
-Processing happens on the ground-station laptop.
+## The one important fact
+
+**App Lab cannot do Bluetooth.** Arduino’s App container has no BlueZ/D-Bus.
+That is why you saw `BLE-DOWN` / Errno 2. Sensors still work — use TCP, or run
+Bluetooth on the Debian **host**.
 
 ```
-[UNO Q]  --Bluetooth-->  [ground-station laptop]
-   DHT11 + LDR                bt_sensor_recv.py
+MCU sensors --Bridge--> App Lab Python --TCP:9123--> laptop     (works now)
+                              \
+                               --TCP:9124--> host_bt_relay.py --BLE--> laptop
 ```
 
-## 1) On the UNO Q (App Lab)
-1. Import / re-import `dht11_temp_only` (or the zip)
-2. Press **Run**
-3. Monitor should show lines like:
-   - `[bt] Powered: yes`
-   - `[bt] Discoverable: yes`
-   - `[bt-ble] advertising as AgriDrone-UNOQ`
+---
 
-If Powered is **no**, Bluetooth on the board is off — see Fix below.
+## Path A — Get data in 2 minutes (TCP / Wi‑Fi)
 
-## 2) On the other computer (ground station)
-Copy/clone this repo, then:
+1. Import this app into App Lab → **Run**
+2. Monitor shows `TCP:9123` and a board IP
+3. On the laptop (same Wi‑Fi):
+```bash
+python -m ground_station.bt_sensor_recv --tcp <BOARD-IP>:9123
+```
 
-### Option A — Bluetooth LE (easiest)
+When the laptop connects, Monitor changes from `WAITING-FOR-LAPTOP` to `SENT`.
+
+---
+
+## Path B — Real Bluetooth (host relay)
+
+### 1) PC: open a shell on the board
+Follow Arduino: https://docs.arduino.cc/tutorials/uno-q/adb/
+
+```bash
+adb devices
+adb shell
+```
+
+### 2) Board shell: start Bluetooth relay
+Copy `python/host_bt_relay.py` onto the board (or clone the repo), then:
+
+```bash
+pip3 install --user bless
+python3 host_bt_relay.py
+```
+
+You want:
+```
+[host] BLE advertising as AgriDrone-UNOQ
+[host] waiting for App Lab on TCP :9124
+```
+
+Leave this terminal open.
+
+### 3) App Lab: Run the sensor app
+Monitor should change to:
+```
+BLE-via-host(172.17.0.1:9124)
+```
+
+### 4) Laptop:
 ```bash
 pip install bleak
 python -m ground_station.bt_sensor_recv
 ```
 
-You should see:
-```
-T=24.0C  RH=45%  light=50/100 (room)  raw=612  ok=True
-```
-
-### If the computer cannot see the UNO Q
-```bash
-python -m ground_station.bt_sensor_recv --scan
-```
-That lists every nearby BLE device. Look for `AgriDrone-UNOQ` or `Arduino`.
-
-**Fix checklist (most common):**
-1. App Lab app is **Running** (not just uploaded)
-2. On the UNO Q Monitor: advertising line appears
-3. Ground-station laptop: **Bluetooth ON**
-4. Stay within a few meters; close other apps using Bluetooth
-5. On Windows: Settings → Bluetooth → make sure it can discover new devices
-6. Still invisible → use classic serial (Option B)
-
-### Option B — Classic Bluetooth Serial (Windows)
-1. Windows Settings → Bluetooth → **Add device**
-2. Pair **AgriDrone-UNOQ** / **Arduino UNO Q**
-3. Device Manager → Ports (COM & LPT) → note e.g. `COM5`
-4. Run:
-```bash
-pip install pyserial
-python -m ground_station.bt_sensor_recv --com COM5
-```
+---
 
 ## Wiring
 | Sensor | Pins |
 |--------|------|
 | DHT11 | S→D2, U→5V, G→GND |
 | LDR | 5V—LDR—A0—100k—GND |
-
-`light` is 1–100 (50 ≈ room at startup). `INVERT` is in `python/light_cal.py`.
