@@ -217,6 +217,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_mcp_schema_rejects_code_and_unknown_fields(self):
         async with self.controller as controller:
             controller._active = True
+            controller._status_read = True
             handler = controller.tools[1].handler
             for arguments in [
                 {"drone_id": "drone-1", "action": "execute"},
@@ -229,6 +230,7 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
     async def test_mcp_command_reaches_only_host_driver(self):
         async with self.controller as controller:
             controller._active = True
+            controller._status_read = True
             result = json.loads(await controller.tools[1].handler(
                 {"drone_id": "drone-1", "action": "start_survey"}
             ))
@@ -305,11 +307,15 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unrelated_service_keys_are_not_forwarded_to_cli(self):
         with patch.dict("os.environ", {"PHOTON_API_KEY": "test-private-placeholder",
-                                      "XAI_API_KEY": "test-private-placeholder"}):
+                                      "ELEVENLABS_API_KEY": "test-private-placeholder",
+                                      "ELEVENLABS_AGENT_ID": "test-agent",
+                                      "ELEVENLABS_TTS_VOICE_ID": "test-voice"}):
             async with self.controller:
                 runtime = FakeSession.instances[-1].runtime
                 self.assertEqual(runtime.env["PHOTON_API_KEY"], "")
-                self.assertEqual(runtime.env["XAI_API_KEY"], "")
+                self.assertEqual(runtime.env["ELEVENLABS_API_KEY"], "")
+                self.assertEqual(runtime.env["ELEVENLABS_AGENT_ID"], "")
+                self.assertEqual(runtime.env["ELEVENLABS_TTS_VOICE_ID"], "")
                 self.assertNotIn("FACTORY_API_KEY", runtime.env)
 
     async def test_factory_failure_stops_driver_and_removes_workspace(self):

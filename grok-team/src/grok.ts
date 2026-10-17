@@ -50,7 +50,6 @@ export function childEnvironment(config: Config): Record<string, string> {
   for (const name of ["HOME", "PATH", "TMPDIR", "USER", "LANG"]) {
     if (process.env[name]) env[name] = process.env[name]!;
   }
-  if (config.key) env.XAI_API_KEY = config.key;
   return env;
 }
 
@@ -66,7 +65,7 @@ export async function runGrok(config: Config, owner: Role, input: string, store:
   // Check the profile exists before starting a billable request.
   readFileSync(profile, "utf8");
   const prompt = JSON.stringify({
-    project: "AgriDrone: photo -> Grok analysis -> embedded Droid -> pilot-reviewed command/Photon alert",
+    project: "AgriDrone: photo -> embedded Droid image analysis + decision -> pilot-reviewed command/Photon voice note",
     coding: "Factory Droid in Cursor; roles coordinate, never implement code directly",
     repository: "jaromero3rd/audio_signaling",
     components: ["drone_interface", "ground_station", "wheat", "chalk", "photon-imessage-agent"],

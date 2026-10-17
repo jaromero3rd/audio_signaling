@@ -1,152 +1,120 @@
-# AgriDrone: Voice-Directed Field Survey Agent
+# AgriDrone: Voice-Directed Field Surveys
 
-AgriDrone is a HackHarvard 2026 prototype for voice-directed Tello field surveys, controlled by an embedded Factory Droid session. It detects wheat heads or AprilTags, analyzes captured images with Grok, and makes bounded reimage, alert, and return-home decisions.
+A prototype with local AprilTag/YOLO steering, bounded Factory Droid decisions,
+ElevenLabs operator voice input, and Photon iMessage notifications.
 
-**The image-analysis decision loop is connected.** Grok's visual assessment is an uncertain model estimate, not a verified crop diagnosis. Real hardware, live vision credentials, and cloud feature deployments still need operator validation.
+| Concern | Provider |
+| --- | --- |
+| Mission decisions and crop-health image analysis | One persistent Factory Droid SDK session, native image input |
+| Operator speech to commands | ElevenAgents, with Scribe transcription and ElevenLabs speech inside the platform |
+| Drone to user text, images, voice notes | Photon direct iMessage space |
+| Optional decision features | Chalk, or explicitly labeled local thresholds |
 
-## What We Built
+**Photon cannot place calls.** An urgent alert is text marked URGENT plus an
+audio attachment, not a telephone call. No telephony integration is used.
+Crop-health scores are uncertain visual estimates, not verified diagnoses.
 
-- **Voice layer:** Grok Voice queues survey intent to Droid, reads status, and stops immediately through the host.
-- **Flight layer:** The local mission state machine handles takeoff, target approach, photo capture, home search, and landing through Tello or a webcam mock.
-- **SDK controller:** One persistent Factory Droid session receives validated image analysis and makes tool-driven decisions while local flight control stays independent.
-- **System notifications:** The host sends mission-status and Droid-requested analysis alerts through a verified private Photon assignment.
-- **Features and history:** Local SQLite survey/decision history is persistent. `--chalk` evaluates fresh analyses through the deployed Chalk named query.
-
-## What's Implemented & Working
-
-| Feature | Implementation status | Try it |
-|---------|-----------------------|--------|
-| **Grok Voice control** | Connected to mission tools | Speak commands after configuring xAI/audio |
-| **Local flight control** | Tello adapter and webcam mock | Takeoff → target → photo → home/land |
-| **Wheat/AprilTag detection** | Live `.pt` detector or AprilTag | Supply weights or use a printed tag |
-| **Photo capture & logging** | Saves local stills and paths | View `captures/` |
-| **Chalk feature evaluation** | Optional runtime query and cloud regression runner | Enable `--chalk`; run labeled boundary cases separately |
-| **Mission state storage** | Standalone Chalk Volume helpers | Not called by the mission |
-| **Embedded Droid session** | Persistent SDK session and restricted tools | Mock-first launcher below |
-| **Photon system notifications** | Host-owned mission hooks | Configure the existing private iMessage assignment |
-| **Photon image-alert helper** | Standalone upstream bridge | See `photon-imessage-agent/`; not called by this mission runtime |
-| **Image-analysis decision loop** | Connected and simulated end-to-end | Photo → Grok → Droid → bounded action/alert |
-
-These are implementation boundaries, not a claim that every service is configured, running, or flight-tested.
-
-## How They're Integrated
-
-### The Default Mission Flow
+## How Droid is used at runtime
 
 ```text
-Operator speech → Grok Voice → persistent Factory Droid
-                                      |
-                           host tools / local approval
-                                      |
-            Camera → detection → local steering → photo
-                                      |
-                       hover with a fixed deadline
-                                      |
-              Grok image understanding → validated analysis
-                                      |
-             local history + optional Chalk → same Droid
-                                      |
-              reimage / Photon alert / return home / land
+Operator → ElevenAgents client tool → DroidVoiceGateway → persistent Droid
+                                                        ↓
+                                            host tools / local approval
+                                                        ↓
+                           camera → local steering → captured image
+                                                        ↓
+                              same Droid session: native Image attachment
+                                                        ↓
+                   strict JSON → host validation → optional Chalk / history
+                                                        ↓
+                     same turn: decision tool + matching final JSON
+                                                        ↓
+                bounded reimage / Photon alert / return home / land
 ```
 
-Grok handles conversation and image understanding; Droid makes high-level decisions. The local controller owns steering. Emergency stop bypasses all cloud work.
+Default mode does not upload photos: Droid handles high-level requests while
+AprilTag/YOLO steer locally. `--crop-analysis` enables the image turn and a
+fixed 90-second hover deadline. Reimages do not renew that deadline.
+Invalid JSON, a failed model turn, or narration without a decision stops the
+mission and requests landing. Emergency stop bypasses cloud latency.
 
-### SDK Execution Boundary
+Image decisions and alerts are staged until the final assessment validates.
+The host controls paths, recipients, alert formatting, limits, and approvals.
+Real starts and extra photos require local `y` approval, including `--no-voice`.
+Only the camera loop calls hardware. `--allow-real-flight` is also required.
 
-```text
-Initial operator instruction → persistent Droid SDK session
-                                      |
-                          restricted mission tools
-                                      |
-                     host validation / local approval
-                                      |
-                  existing mission and camera/RC loop
-                                      |
-              validated analysis → same Droid session
-              mission/analysis alerts → Photon user
-```
+## Setup and safe checks
 
-Voice is an input adapter to Droid, not a second flight authority. SDK/model latency runs off the camera/RC thread. Image bytes go to xAI; only validated analysis goes to Droid. Reimages never renew the 90-second analysis hold.
+Use Python 3.10+ and install `requirements.txt`. Authenticate the local `droid`
+CLI. Copy `.env.example` privately and follow [SETUP.md](SETUP.md) to configure
+the ElevenLabs dashboard agent and optional Photon direct space.
 
-## Why We Chose Each Service
-
-### Grok (xAI)
-Realtime speech connects natural requests to `start_survey`, `get_mission_status`, and `abort_mission`. This voice bridge does not perform crop-health image analysis.
-
-### Chalk
-Online resolvers compute `healthy` / `watch` / `critical`, severity, and recommended action from Grok's health score when `--chalk` is enabled. Without it, clearly labeled local thresholds provide context. Chalk does not inspect the image.
-
-### Photon
-The host sends status notifications and validated analysis text to the configured human through an existing direct iMessage space. Droid can request an alert but cannot choose recipients or arbitrary text. This mission runtime does not send image attachments or accept incoming mission commands.
-
-### Chalk Volume
-JSON snapshot, decision-log, and latest-survey storage helpers exist separately. The mission does not save through them or automatically resume flight after a restart.
-
-### Droid (Factory)
-The official Python SDK provides one persistent session with status, command, survey-context, and analysis-alert tools. The host bounds commands, approvals, queues, timeouts, turns, and extra photos. See the [SDK runtime guide](ground_station/agent/README.md) for the exact authority boundary.
-
-## Quick Start
-
-Install [requirements.txt](requirements.txt) in a Python 3.10+ virtual environment. Commands below run from the repository root.
-
-### 1. Webcam Mock (No Drone, No Cloud)
+Offline, fake-only validation, with no model calls, messages, audio devices,
+camera, or drone:
 
 ```bash
-python demo.py --controller voice --mock --target tag --target-tag 12 --home-tag 12 --no-voice --auto --no-photon
+python -m unittest discover -s tests -v
 ```
 
-This opens the webcam/display and prints simulated flight commands. Use a matching printed AprilTag; generate ID 12 with `ground_station/print_apriltag.py --id 12`. It is not a headless test.
-
-### 2. Add Voice
-
-Configure `XAI_API_KEY` privately, authenticate the `droid` CLI, and ensure working microphone/speaker devices. The default controller is Droid and defaults to a webcam mock:
+Webcam demo with real Factory inference but no voice or messages:
 
 ```bash
-python demo.py --mock --target tag --target-tag 12 --home-tag 12 --no-photon
+python demo.py --mock --target tag --target-tag 12 --home-tag 12 \
+  --fake-analysis --no-voice --no-photon
 ```
 
-### 3. Use the Embedded Droid SDK
+`--fake-analysis` is explicitly simulated and forbidden on real hardware.
+It is not a fallback for a failed model. A webcam demo is not a headless test.
 
-With an authenticated `droid` CLI or `FACTORY_API_KEY`:
+With a configured ElevenAgents agent, omit `--no-voice`. To enable native
+image analysis, replace `--fake-analysis` with `--crop-analysis`.
+Both use the same persistent Droid session.
+
+Photon credentials enable **real iMessages even in mock mode**, labeled MOCK.
+Keep `--no-photon` for local-only runs. Critical analysis alerts requested by
+Droid get text plus a voice note when TTS is configured. Non-critical alerts
+are text-only unless the operator passes `--voice-notes`.
+
+The authenticated smoke test is opt-in:
 
 ```bash
-python -m ground_station.agent.session --check-sdk
-python -m ground_station.agent.session --target tag --target-tag 12 --home-tag 12 --no-voice --no-photon
+python tests/live_droid_pipeline.py
 ```
 
-The check opens no hardware and runs no model turn. The second command requests a webcam-mock survey and needs `XAI_API_KEY` for real image analysis. Add `--fake-analysis` for explicitly simulated results without xAI. Real SDK-controlled flight requires explicit `--allow-real-flight` and local `y` approval. Space latches a stop; `q` quits.
+It sends a generated PNG to the real Factory session, with fake Photon and
+ElevenLabs transports and no hardware. It is not part of fake-only validation.
 
-Run `python tests/live_droid_pipeline.py` for a headless authenticated SDK smoke test. It uses one real Droid session and simulated image/Photon providers, opens no devices, and sends no real messages.
+## Limits and references
 
-### 4. Configure System-to-User Photon Messages
+- Native images: JPEG, PNG, GIF, WebP, nonempty, at most 5 MiB.
+- Assessments: finite score in `[0, 1]`, nonblank summary up to 3,000 characters.
+- One survey, two extra photos, 12 mission-tool calls per turn, 16 turns.
+- Approval expires after 60 seconds. Space stops; `q` exits.
+- Voice notes: in-memory MP3, Flash v2.5, at most 3,500 text characters / 5 MiB.
+  Missing or failed TTS does not prevent the independent text attempt.
+- Notifications are best effort, not a durable outbox. Accepted is not delivered.
+- Photon upload supports image attachments; the mission currently sends status
+  text and analysis text/audio, not captured photos or incoming mission commands.
 
-```bash
-python -m ground_station.photon --env /absolute/path/to/private/photon.env --check
-python -m ground_station.agent.session --photon-env /absolute/path/to/private/photon.env
-```
+See the [runtime guide](ground_station/agent/README.md), [technical guide](README_TECHNICAL.md),
+and [requirements](prd.md). Local history is `data/surveys.sqlite3`; optional
+Chalk Volume helpers do not automatically resume flight.
 
-The first command only verifies routing. The second runs the mock and sends real mission-status iMessages labeled `MOCK`. Keep credentials private. The [runtime guide](ground_station/agent/README.md#photon-system-to-user-messaging) explains default configuration, limits, and the explicit test-send command.
+## Field networking
 
-### Real Tello Operation
+Default radios use Mac Wi-Fi for Tello and USB Personal Hotspot for internet.
+The UNO Q joins that phone's Wi-Fi and posts to the Mac on `172.20.10.0/28`.
+For explicitly authorized network setup:
 
-Default radios (no USB Wi-Fi dongle):
+1. Connect the phone by USB, trust the Mac, and enable Personal Hotspot.
+2. Run `python -m drone_interface.field_links --apply --tello-ssid TELLO-7`.
+   This joins Tello and prioritizes the USB hotspot for internet.
+3. Start `python -m ground_station.sensor_recv` for board telemetry.
+4. Copy the UNO Q example config privately, set hotspot SSID/password, and
+   leave `ground_station_url` as `"auto"`. Mic transfer is off by default.
 
-1. Plug the phone into the Mac, Trust This Computer, turn **Personal Hotspot** on (USB + Wi-Fi).
-2. `python -m drone_interface.field_links --apply --tello-ssid TELLO-7`  
-   Built-in Wi-Fi joins the Tello; USB hotspot is moved above Wi-Fi so internet is not the drone.
-3. On the laptop: `python -m ground_station.sensor_recv` then `python demo.py --allow-real-flight …`
-4. On the UNO Q: copy `uno_q_field_station/python/config.example.json` → `config.json`, set `wifi.ssid` to the hotspot name, run the field-station app. It joins the phone Wi-Fi and POSTs to the Mac on `172.20.10.0/28`.
+Keep the phone within board Wi-Fi range. `--dongle N` remains a fallback.
+Network setup does not authorize flight.
 
-Keep the phone near the flight area (board Wi-Fi range). USB stick `--dongle N` remains a fallback.
-
-The SDK entrypoint defaults to mock. These are prototype controls, not a flight-safety certification.
-
-## For Details
-
-- [SDK runtime and Photon guide](ground_station/agent/README.md): tools, approval, lifecycle, configuration, and tests.
-- [README_TECHNICAL.md](README_TECHNICAL.md): modules, cloud helper boundaries, entrypoints, and repository structure.
-- [PRD](prd.md): target requirements, including work that is not yet implemented.
-
-## License and Attribution
-
-HackHarvard 2026 submission. Uses the [Global Wheat Head Dataset 2021](https://kaggle.com/datasets/vbookshelf/global-wheat-head-dataset-2021) (CC BY 4.0) and YOLOv8 (Ultralytics, AGPL-3.0).
+HackHarvard 2026 prototype. Uses the Global Wheat Head Dataset 2021 (CC BY 4.0)
+and Ultralytics YOLO (AGPL-3.0). These controls are not flight-safety certification.

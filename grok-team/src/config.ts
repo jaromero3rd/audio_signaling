@@ -48,7 +48,7 @@ export function configuration() {
     state,
     bin: local.GROK_BIN || "grok",
     model: local.GROK_MODEL || "grok-4.7-build-fast",
-    key: local.XAI_API_KEY || root.XAI_API_KEY || "",
+    key: "", // Legacy coordination uses its CLI login, never injected provider keys.
     token: local.DISCORD_BOT_TOKEN || "",
     application: local.DISCORD_APPLICATION_ID || "",
     guild: local.DISCORD_GUILD_ID || "",

@@ -4,12 +4,12 @@
 
 | Concern | Where it runs |
 |---------|----------------|
-| Farmer voice commands → Grok Voice → drone control | **Laptop** (`ground_station/voice_grok.py`) |
+| Farmer voice commands → ElevenAgents → Droid intent | **Laptop** (`ground_station/voice_eleven.py`) |
 | Field sensors (DHT11, light) + SD offline log | **UNO Q MCU** |
 | Mic capture + transfer to ground computer | **UNO Q Linux** (`mic_capture` / `mic_transfer`) |
 | Return-to-Wi-Fi when link is lost | **UNO Q Linux** autonomy agent |
 
-The UNO Q does **not** run Grok Voice. It only records microphone PCM and posts it to the ground station (`POST /mic`).
+The UNO Q does **not** run ElevenAgents. It only records microphone PCM and posts it to the ground station (`POST /mic`). This relay is not wired to the command voice session.
 
 ## Hardware (UNO Q)
 
@@ -48,5 +48,5 @@ python -m ground_station.sensor_recv --host 0.0.0.0 --port 8765
 Farmer voice control (separate process on the same laptop):
 
 ```bash
-python demo.py   # Grok Voice + Tello mission
+python demo.py   # ElevenAgents + Droid mission (webcam mock by default)
 ```

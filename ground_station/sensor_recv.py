@@ -4,7 +4,7 @@
   /telemetry  — DHT11 / light / autonomy JSON
   /mic        — raw microphone chunks from the UNO Q (capture + transfer only)
 
-Farmer voice commands (Grok Voice) stay on this laptop via voice_grok.py —
+Farmer voice commands (ElevenAgents) stay on this laptop via voice_eleven.py —
 they are not handled by the UNO Q.
 
 Run:
@@ -118,6 +118,8 @@ def make_handler(store: TelemetryStore):
                     {
                         "ok": True,
                         "samples": store.count,
+                        "mic_chunks": store.mic_chunks,
+                        "mic_bytes": store.mic_bytes,
                         "sensors": {
                             "temp_c": latest.get("temp_c"),
                             "humidity_pct": latest.get("humidity_pct"),
@@ -211,9 +213,11 @@ def main(argv: list[str] | None = None) -> int:
             post_url = tether
     except Exception:
         pass
-    print("Mac is LISTENING (this is supposed to sit here). Samples appear only after the board POSTs.")
+    print("Mac is LISTENING — samples appear only after the board POSTs.")
     print(f"Put this on the board as ground_station_url:\n  {post_url}")
-    print(f"Browser: http://127.0.0.1:{args.port}/health")
+    print(f"Mic POST:       {post_url.rsplit('/', 1)[0]}/mic  -> {args.mic_file}")
+    print(f"Browser check:  http://127.0.0.1:{args.port}/latest")
+    print("ElevenAgents (farmer commands) is separate: ground_station/voice_eleven.py")
     print("Ctrl-C to stop.")
 
     def _heartbeat() -> None:

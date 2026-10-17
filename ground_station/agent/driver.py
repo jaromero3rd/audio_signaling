@@ -46,6 +46,7 @@ class MissionDriver:
         self._photo_count = 0
         self._started = False
         self._stopped = False
+        self._stop_generation = 0
         self._capture = 0
         self._analysis_ready = False
 
@@ -60,6 +61,7 @@ class MissionDriver:
                 "drone_id": self.drone_id,
                 "mock": self.mock,
                 "stopped": self._stopped,
+                "stop_generation": self._stop_generation,
                 "survey_started": self._started,
                 "extra_photos_remaining": MAX_EXTRA_PHOTOS - self._photo_count,
                 "pending_approval": self._pending[0] if self._pending else None,
@@ -155,9 +157,15 @@ class MissionDriver:
 
     def stop(self) -> dict[str, Any]:
         with self._lock:
+            analysis_capture = (
+                self._capture if not self._stopped and self._analysis_ready
+                and self.mission.analysis_waiting() else None
+            )
+            self._stop_generation += 1
             self._stopped = True
             self._pending = None
             self._photo = False
             if self.mission.snapshot()["phase"] not in ("idle", "done"):
                 self.mission.request_abort()
-            return {"ok": True, "status": "landing_requested", "stopped": True}
+            return {"ok": True, "status": "landing_requested", "stopped": True,
+                    "stop_generation": self._stop_generation, "analysis_capture": analysis_capture}

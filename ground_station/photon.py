@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
+import itertools
+import json
 import os
 import queue
 import re
@@ -30,9 +34,12 @@ MESSAGES = {
 
 
 class PhotonError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool = False):
+    def __init__(self, message: str, *, retryable: bool = False, attachment_not_ready=False,
+                 retry_after=5):
         super().__init__(message)
         self.retryable = retryable
+        self.attachment_not_ready = attachment_not_ready
+        self.retry_after = retry_after
 
 
 @dataclass(frozen=True, repr=False)
@@ -86,8 +93,10 @@ class PhotonConfig:
 
 
 class PhotonClient:
-    def __init__(self, config: PhotonConfig, *, transport=None):
+    def __init__(self, config: PhotonConfig, *, transport=None, sleep=time.sleep):
         self.config = config
+        self._sleep = sleep
+        self._attachments = {}
         self._route: tuple[str, str] | None = None
         self._http = httpx.Client(
             base_url="https://api.photon.codes",
@@ -104,9 +113,16 @@ class PhotonClient:
         except httpx.HTTPError:
             raise PhotonError("Photon transport failed", retryable=True) from None
         if not 200 <= response.status_code < 300:
+            try:
+                not_ready = (response.status_code == 409
+                             and response.json().get("code") == "ATTACHMENT_NOT_READY")
+                retry_after = min(5, max(0, float(response.headers.get("retry-after", "5"))))
+            except (ValueError, TypeError, AttributeError):
+                not_ready, retry_after = False, 5
             raise PhotonError(
                 f"Photon request failed (HTTP {response.status_code})",
                 retryable=response.status_code in (408, 429) or response.status_code >= 500,
+                attachment_not_ready=not_ready, retry_after=retry_after,
             )
         try:
             data = response.json()
@@ -209,6 +225,65 @@ class PhotonClient:
             raise PhotonError("Photon accepted no valid message identifier")
         return {"id": message_id, "status": result.get("status", "unknown")}
 
+    def upload_attachment(self, data: bytes, *, content_type: str) -> str:
+        """Photon multipart/related: metadata, then bytes. Identical retries stay identical."""
+        types = {"audio/mpeg": "alert.mp3", "image/jpeg": "survey.jpg",
+                 "image/png": "survey.png", "image/gif": "survey.gif", "image/webp": "survey.webp"}
+        if content_type not in types or not isinstance(data, bytes) or not 0 < len(data) <= 5 * 1024 * 1024:
+            raise PhotonError("Unsupported or oversized attachment")
+        if self._route is None:
+            raise PhotonError("Photon routing has not been verified")
+        digest = hashlib.sha256(data).hexdigest()
+        cache_key = (digest, content_type)
+        if cache_key in self._attachments:
+            return self._attachments[cache_key]
+        boundary = f"agridrone-{digest}"
+        meta = json.dumps({"contentType": content_type, "sizeBytes": len(data),
+                           "filename": types[content_type]}, separators=(",", ":"))
+        body = (f"--{boundary}\r\ncontent-type: application/json\r\n\r\n{meta}\r\n"
+                f"--{boundary}\r\ncontent-type: {content_type}\r\n\r\n").encode() + data + (
+                    f"\r\n--{boundary}--\r\n").encode()
+        for attempt in range(3):
+            try:
+                result = self._request(
+                    "POST", f"/v1/projects/{self.config.project}/attachments",
+                    headers={"content-type": f"multipart/related; boundary={boundary}",
+                             "content-length": str(len(body)),
+                             "idempotency-key": f"agridrone-att:{digest}:{types[content_type]}"},
+                    content=body,
+                )
+                attachment_id = result.get("id")
+                if not isinstance(attachment_id, str) or not RESOURCE_ID.fullmatch(attachment_id):
+                    raise PhotonError("Photon returned no valid attachment identifier")
+                self._attachments[cache_key] = attachment_id
+                return attachment_id
+            except PhotonError as error:
+                if not error.retryable or attempt == 2:
+                    raise
+                self._sleep(0.25 * (attempt + 1))
+
+    def send_attachment(self, attachment_id: str, event_id: str) -> dict:
+        if (self._route is None or not isinstance(attachment_id, str)
+                or not RESOURCE_ID.fullmatch(attachment_id)):
+            raise PhotonError("Unverified attachment route or identifier")
+        space_id, sender_id = self._route
+        for attempt in range(8):
+            try:
+                result = self._request(
+                    "POST", f"/v1/projects/{self.config.project}/messages",
+                    headers={"idempotency-key": f"agridrone-audio:{event_id}"},
+                    json={"spaceId": space_id, "senderId": sender_id,
+                          "content": {"type": "attachment", "attachmentId": attachment_id}},
+                )
+                if not isinstance(result.get("id"), str) or not RESOURCE_ID.fullmatch(result["id"]):
+                    raise PhotonError("Photon returned no valid message identifier")
+                return {"id": result["id"], "status": result.get("status", "unknown")}
+            except PhotonError as error:
+                if attempt == 7 or not (error.attachment_not_ready or error.retryable):
+                    raise
+                self._sleep(error.retry_after if error.attachment_not_ready else 0.25 * (attempt + 1))
+        raise PhotonError("Photon attachment never became ready")
+
     def delivery_status(self, message_id: str) -> str:
         if not RESOURCE_ID.fullmatch(message_id):
             raise PhotonError("Invalid Photon message identifier")
@@ -228,22 +303,34 @@ def analysis_text(analysis: dict | None) -> str:
             name: analysis[name] for name in ("field_id", "health_score", "analysis_summary")
         })
         source = analysis["vision_source"]
-        if source not in ("grok", "fake"):
+        if source not in ("droid", "fake"):
             raise ValueError("Unknown vision source")
     except (ValueError, TypeError, KeyError):
         raise PhotonError("Invalid host analysis notification") from None
-    label = "SIMULATED, not a crop diagnosis" if source == "fake" else "Grok visual estimate, not a verified diagnosis"
-    return (f"Field {validated.field_id}: health score {validated.health_score:.2f}. "
+    label = "SIMULATED, not a crop diagnosis" if source == "fake" else "Droid visual estimate, not a verified diagnosis"
+    urgent = "URGENT: " if critical_analysis(analysis) else ""
+    return (f"{urgent}Field {validated.field_id}: health score {validated.health_score:.2f}. "
             f"{label}. Findings (untrusted model observations): {validated.analysis_summary}")
+
+
+def critical_analysis(analysis):
+    features = analysis.get("features", {})
+    if not isinstance(features, dict):
+        raise PhotonError("Invalid host analysis features")
+    return (analysis["health_score"] < 0.4 or features.get("health_flag") == "critical"
+            or features.get("field_survey.health_flag") == "critical")
 
 
 class PhotonNotifier:
     """Bounded, best-effort delivery off the RC loop; one notification per event."""
 
-    def __init__(self, client: PhotonClient, *, mock: bool):
+    def __init__(self, client: PhotonClient, *, mock: bool, voice_notes=None, voice_requested=False):
         self.client = client
         self.mock = mock
-        self._queue: queue.Queue[tuple[str, str, dict | None]] = queue.Queue(maxsize=len(MESSAGES) + 3)
+        self.voice_notes = voice_notes
+        self.voice_requested = voice_requested
+        self._queue = queue.PriorityQueue(maxsize=len(MESSAGES) + 3)
+        self._sequence = itertools.count()
         self._seen: set[str] = set()
         self._lock = threading.Lock()
         self._closing = threading.Event()
@@ -255,6 +342,8 @@ class PhotonNotifier:
             self.client.check()
         except BaseException:
             self.client.close()
+            if self.voice_notes is not None:
+                self.voice_notes.close()
             raise
         self._thread.start()
 
@@ -264,7 +353,7 @@ class PhotonNotifier:
                 return
             self._seen.add(event)
             try:
-                self._queue.put_nowait((event, f"{self._run_id}:{event}", None))
+                self._queue.put_nowait((1, next(self._sequence), event, f"{self._run_id}:{event}", None))
             except queue.Full:
                 print("Photon notification queue full; flight control was not blocked.")
 
@@ -278,7 +367,9 @@ class PhotonNotifier:
             if key in self._seen or self._closing.is_set():
                 return False
             try:
-                self._queue.put_nowait(("analysis", f"{self._run_id}:{key}", dict(analysis)))
+                priority = 0 if critical_analysis(analysis) else 1
+                self._queue.put_nowait((priority, next(self._sequence), "analysis",
+                                       f"{self._run_id}:{key}", copy.deepcopy(analysis)))
             except queue.Full:
                 return False
             self._seen.add(key)
@@ -288,7 +379,7 @@ class PhotonNotifier:
         try:
             while not self._closing.is_set() or not self._queue.empty():
                 try:
-                    event, event_id, analysis = self._queue.get(timeout=0.1)
+                    _, _, event, event_id, analysis = self._queue.get(timeout=0.1)
                 except queue.Empty:
                     continue
                 for attempt in range(3):
@@ -303,15 +394,37 @@ class PhotonNotifier:
                             print(f"Photon notification failed ({event}); no private payload logged.")
                             break
                         time.sleep(0.25 * (attempt + 1))
+                if (event == "analysis" and analysis is not None
+                        and (critical_analysis(analysis) or self.voice_requested)):
+                    self._send_voice_note(analysis, event_id)
         except Exception as error:
             print(f"Photon notification worker stopped ({type(error).__name__}); no private payload logged.")
         finally:
             self.client.close()
+            if self.voice_notes is not None:
+                self.voice_notes.close()
+
+    def _send_voice_note(self, analysis, event_id):
+        from ground_station.voice_note import VoiceNoteError
+
+        if self.voice_notes is None:
+            print("Photon voice note unavailable: configure ElevenLabs TTS. Text remains independent.")
+            return
+        try:
+            text = f"AgriDrone ({'MOCK' if self.mock else 'TELLO'}): {analysis_text(analysis)}"
+            audio = self.voice_notes.synthesize(text)
+            attachment = self.client.upload_attachment(audio, content_type="audio/mpeg")
+            self.client.send_attachment(attachment, event_id)
+            print("Photon voice note accepted; delivery is not yet confirmed.")
+        except (PhotonError, VoiceNoteError):
+            print("Photon voice note failed; no private payload logged. No call was placed.")
 
     def close(self) -> None:
         self._closing.set()
         if self._thread.ident is None:
             self.client.close()
+            if self.voice_notes is not None:
+                self.voice_notes.close()
             return
         self._thread.join(timeout=5)
         if self._thread.is_alive():
