@@ -186,6 +186,7 @@ def main() -> int:
     if not args.no_voice:
         if not os.environ.get("XAI_API_KEY"):
             print("Missing XAI_API_KEY. Put it in .env or export it.")
+            droid.close()
             return 1
         from ground_station.voice_grok import start_voice_thread
 
@@ -194,6 +195,7 @@ def main() -> int:
             print(f"Grok Voice did not connect in {GROK_READY_S:.0f}s. Check laptop Wi-Fi/internet and API key.")
             if not args.auto:
                 drone.close()
+                droid.close()
                 return 1
             print("Continuing without voice because --auto was set.")
             voice = None
