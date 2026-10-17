@@ -13,3 +13,7 @@ runs/
 wheat_detection/gwhd.yaml
 *.pt
 yolov8*.pt
+.uno_q_sd/
+uno_q/config.env
+uno_q/config.yaml
+uno_q/linux/.venv/

@@ -149,9 +149,27 @@ audio_signaling/
 │   ├── requirements.txt
 │   └── models/
 │
+├── uno_q/                       # Arduino Uno Q edge hub (sensors, SD failover, offline AprilTag)
+│   ├── mcu/sensor_bridge/       # STM32 sketch (Bridge RPC)
+│   ├── linux/uno_q_linux/       # ONLINE host relay / OFFLINE SD + seek
+│   └── README.md                # Wiring, flash/run, demo scripts
+│
 ├── chalk/                       # Feature definitions & evals
 ├── requirements.txt             # Python dependencies
 └── .env.example                 # Credential template
+```
+
+### Uno Q offline / online hub
+
+See **[uno_q/README.md](uno_q/README.md)**. Quick mock (no board):
+
+```bash
+# Terminal A — laptop receiver
+python3 -m ground_station.uno_q_receiver --port 8787
+
+# Terminal B — mock ONLINE or OFFLINE
+./uno_q/scripts/demo_online.sh
+./uno_q/scripts/demo_offline.sh
 ```
 
 ---

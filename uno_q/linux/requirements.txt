@@ -1,0 +1,6 @@
+# Uno Q Linux coordinator (also runs in MOCK on a laptop)
+numpy
+opencv-python-headless>=4.8
+PyYAML>=6.0
+# On a desktop with GUI preview you may prefer opencv-python instead.
+# requests optional — stdlib urllib used by default
