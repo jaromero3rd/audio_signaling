@@ -14,8 +14,9 @@ python wheat/download_dataset.py
 python wheat/prepare_labels.py
 python wheat/train.py
 python wheat/predict.py path/to/field.png
+python wheat/detect.py path/to/field.png --save
 ```
 
-Images stay in `data/` (gitignored, about 10 GB). The finetuned checkpoint is `wheat/weights/yolov8s-wheat.pt`.
+Images stay in `data/` (gitignored, about 10 GB). The finetuned checkpoint is `wheat/weights/yolov8s-wheat.pt`. The portable model is `wheat/weights/yolov8s-wheat.onnx` (1024 px input). `wheat/detect.py` loads that file and prints every wheat head as `x1 y1 x2 y2 confidence`. `--save` writes an annotated copy under `runs/wheat/onnx/`. Regenerate the ONNX file with `python wheat/export_onnx.py`.
 
 Training defaults: YOLOv8s, 1024 px, batch 8, 50 epochs, COCO pretrained initialization.

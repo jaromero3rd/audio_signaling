@@ -1,2 +1,6 @@
 ultralytics>=8.3
 huggingface_hub>=0.26
+onnx>=1.16
+onnxruntime>=1.18
+opencv-python>=4.8
+numpy
