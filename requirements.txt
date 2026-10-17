@@ -4,3 +4,4 @@ sounddevice
 opencv-python>=4.8
 djitellopy>=2.5
 ultralytics>=8.0
+websockets>=12.0
