@@ -9,7 +9,7 @@ from pathlib import Path
 from ultralytics import YOLO
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_WEIGHTS = Path(__file__).resolve().parent / "weights" / "yolov8s-wheat.pt"
+DEFAULT_WEIGHTS = REPO_ROOT / "models" / "wheat_detection.pt"
 
 
 def main() -> None:
@@ -31,7 +31,7 @@ def main() -> None:
         conf=args.conf,
         device=args.device,
         save=True,
-        project=str(REPO_ROOT / "runs" / "wheat"),
+        project=str(REPO_ROOT / "runs" / "wheat_detection"),
         name="predict",
         exist_ok=True,
     )

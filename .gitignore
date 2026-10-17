@@ -6,6 +6,6 @@ datasets/
 data/
 runs/
 .cache/
-wheat/gwhd.yaml
+wheat_detection/gwhd.yaml
 *.pt
 yolov8*.pt

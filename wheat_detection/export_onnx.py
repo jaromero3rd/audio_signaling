@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
-DEFAULT_WEIGHTS = Path(__file__).resolve().parent / "weights" / "yolov8s-wheat.pt"
+DEFAULT_WEIGHTS = Path(__file__).resolve().parents[1] / "models" / "wheat_detection.pt"
 
 
 def main() -> None:

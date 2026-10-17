@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fine-tune YOLOv8 on wheat heads (class 0) and copy best.pt to models/wheat_heads.pt."""
+"""Fine-tune YOLOv8 on wheat heads (class 0) and copy best.pt to models/wheat_detection.pt."""
 
 from __future__ import annotations
 
