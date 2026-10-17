@@ -18,7 +18,10 @@ def evaluate_and_log(photo_url: str, health_score: float, field_id: str) -> dict
         )
     except Exception as exc:
         result = {"health_flag": "unknown", "severity": 0.0, "action": "continue", "error": str(exc)}
-        append_decision({"type": "chalk_eval_error", "field_id": field_id, "error": str(exc)})
+        try:
+            append_decision({"type": "chalk_eval_error", "field_id": field_id, "error": str(exc)})
+        except Exception:
+            pass
         return result
 
     result = {
@@ -26,12 +29,15 @@ def evaluate_and_log(photo_url: str, health_score: float, field_id: str) -> dict
         "severity": raw.get(f"{_FS}.severity", 0.0),
         "action": raw.get(f"{_FS}.recommended_action", "continue"),
     }
-    append_decision({
-        "type": "chalk_eval",
-        "field_id": field_id,
-        "photo_url": photo_url,
-        "health_score": health_score,
-        **result,
-    })
-    set_last_survey(field_id, {**result, "photo_url": photo_url, "health_score": health_score})
+    try:
+        append_decision({
+            "type": "chalk_eval",
+            "field_id": field_id,
+            "photo_url": photo_url,
+            "health_score": health_score,
+            **result,
+        })
+        set_last_survey(field_id, {**result, "photo_url": photo_url, "health_score": health_score})
+    except Exception:
+        pass
     return result
