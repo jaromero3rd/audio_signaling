@@ -28,6 +28,7 @@ from drone_interface.tello_client import MockDrone, TelloDrone
 from ground_station.apriltag import FAMILIES, AprilTagDetector
 from ground_station.control import width_frac_for_distance, yaw_forward
 from ground_station.mission import CLOSE_FEET_DEFAULT, TAG_SIZE_M_DEFAULT
+from ground_station.overlay import draw_hud_lines
 from ground_station.vision import Box
 
 FRAME_STALE_S = 0.5
@@ -76,17 +77,7 @@ def draw_hud(
         "STALE FRAME" if stale else "",
         "t takeoff  g guide  l land  space e-stop  p photo  q quit",
     ]
-    y = 22
-    for line in lines:
-        if not line:
-            continue
-        cv2.putText(
-            vis, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA
-        )
-        cv2.putText(
-            vis, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 20, 20), 1, cv2.LINE_AA
-        )
-        y += 22
+    draw_hud_lines(vis, lines)
     return vis
 
 

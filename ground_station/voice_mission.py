@@ -28,6 +28,7 @@ from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
 from ground_station.grok_image import analyze_photo_with_grok_async
 from ground_station.mission import CLOSE_FEET_DEFAULT, FRAME_STALE_S, Gains, TAG_SIZE_M_DEFAULT, SurveyMission
+from ground_station.overlay import draw_hud_lines
 from ground_station.vision import DEFAULT_WEIGHTS, Box
 
 GROK_READY_S = 20.0
@@ -49,7 +50,7 @@ def draw_hud(
 ) -> np.ndarray:
     vis = frame.copy()
     h, w = vis.shape[:2]
-    cv2.line(vis, (w // 2, 0), (w // 2, h), (80, 80, 80), 1)
+    cv2.line(vis, (w // 2, 170), (w // 2, h), (60, 60, 60), 1)
     if box is not None:
         cv2.rectangle(vis, (box.x, box.y), (box.x + box.w, box.y + box.h), (0, 255, 255), 2)
         cv2.circle(vis, (int(box.cx), int(box.cy)), 5, (0, 255, 255), -1)
@@ -76,17 +77,7 @@ def draw_hud(
         "STALE" if stale else "",
         "say survey the wheat  |  space abort  |  q quit",
     ]
-    y = 22
-    for line in lines:
-        if not line:
-            continue
-        cv2.putText(
-            vis, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA
-        )
-        cv2.putText(
-            vis, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (20, 20, 20), 1, cv2.LINE_AA
-        )
-        y += 22
+    draw_hud_lines(vis, lines)
     return vis
 
 
