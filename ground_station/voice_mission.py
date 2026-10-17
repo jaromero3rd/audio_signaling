@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from drone_interface.tello_client import MockDrone, TelloDrone
+from ground_station.chalk_eval_mission import evaluate_and_log
 from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
 from ground_station.mission import CLOSE_FEET_DEFAULT, FRAME_STALE_S, Gains, TAG_SIZE_M_DEFAULT, SurveyMission
@@ -423,12 +424,19 @@ def _run_mission(args, photon, cleanup) -> int:
                     # Fire-and-forget Grok still (origin/main) when not in crop-hold pipeline.
                     from ground_station.grok_image import analyze_photo_with_grok_async
 
-                    def on_grok_complete(analysis):
+                    def on_grok_complete(analysis, _path=path):
                         print(
                             f"photo analysis: health={analysis.get('health_score'):.2f} "
                             f"summary={str(analysis.get('analysis_summary', ''))[:50]}..."
                         )
                         mission.last_analysis = analysis
+                        chalk_result = evaluate_and_log(
+                            photo_url=str(_path),
+                            health_score=analysis.get("health_score", 0.0),
+                            field_id=analysis.get("field_id", "field-0"),
+                        )
+                        mission.last_chalk_result = chalk_result
+                        print(f"chalk eval: flag={chalk_result['health_flag']} severity={chalk_result['severity']:.2f} action={chalk_result['action']}")
 
                     analyze_photo_with_grok_async(path, on_grok_complete)
 

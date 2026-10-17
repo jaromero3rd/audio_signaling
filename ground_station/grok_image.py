@@ -35,9 +35,9 @@ def analyze_photo_with_grok_async(
                 "health_score": result.health_score,
                 "analysis_summary": result.analysis_summary,
             }
+            on_complete(output)
         except Exception as exc:  # noqa: BLE001
-            output = {"health_score": 0.5, "analysis_summary": f"error: {exc}"}
-        on_complete(output)
+            on_complete({"health_score": 0.5, "analysis_summary": f"error: {exc}"})
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
