@@ -13,6 +13,7 @@ import uuid
 from ground_station.chalk_client import FS, get_client
 
 EVALUATE_SURVEY_QUERY = "evaluate_field_survey"  # defined in chalk/named_queries.py
+EVALUATE_SURVEY_WEATHER_QUERY = "evaluate_field_survey_weather"
 
 VALID_FLAGS = {"healthy", "watch", "critical"}
 VALID_ACTIONS = {"continue", "reimage", "alert-operator"}
@@ -54,6 +55,9 @@ def evaluate_survey_named(
     photo_url: str = "",
     drone_id: str = "",
     branch: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    include_weather: bool = False,
 ) -> dict:
     """Run the registered `evaluate_field_survey` named query.
 
@@ -63,20 +67,33 @@ def evaluate_survey_named(
     raises RuntimeError on resolver errors or any violation. `branch`
     targets a branch deployment: until `chalk apply` runs against prod, the
     named query exists only on the deployed branch (e.g. "schedtest").
+
+    include_weather defaults off so existing callers, including the Droid
+    pipeline, keep working against the deploy that has no latitude input.
+    When it is on, the separate evaluate_field_survey_weather query is used
+    and the Treehouse point is sent unless latitude and longitude are set.
+    Output checks still cover only the image labels.
     """
     if not 0.0 <= health_score <= 1.0:
         raise ValueError(f"input check failed: health_score {health_score} outside [0, 1]")
     survey_id = str(uuid.uuid4())
+    query_input = {
+        f"{FS}.id": survey_id,
+        f"{FS}.field_id": field_id,
+        f"{FS}.drone_id": drone_id,
+        f"{FS}.photo_url": photo_url,
+        f"{FS}.health_score": health_score,
+        f"{FS}.analysis_summary": analysis_summary,
+    }
+    if include_weather:
+        from ground_station.chalk_client import load_weather_live
+
+        live = load_weather_live()
+        query_input[f"{FS}.latitude"] = live.TREEHOUSE_LAT if latitude is None else latitude
+        query_input[f"{FS}.longitude"] = live.TREEHOUSE_LON if longitude is None else longitude
     res = get_client().query(
-        input={
-            f"{FS}.id": survey_id,
-            f"{FS}.field_id": field_id,
-            f"{FS}.drone_id": drone_id,
-            f"{FS}.photo_url": photo_url,
-            f"{FS}.health_score": health_score,
-            f"{FS}.analysis_summary": analysis_summary,
-        },
-        query_name=EVALUATE_SURVEY_QUERY,
+        input=query_input,
+        query_name=EVALUATE_SURVEY_WEATHER_QUERY if include_weather else EVALUATE_SURVEY_QUERY,
         branch=branch,
     )
     if res.errors:

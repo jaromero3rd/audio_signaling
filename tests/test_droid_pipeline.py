@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -171,6 +172,39 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         DecisionSession.decisions = ["continue_survey"]
         DecisionSession.alert = False
 
+    async def test_weather_justification_is_stored_and_a_failure_still_decides(self):
+        self.pipeline.weather = True
+        capture_phase(self.mission)
+        capture_id = self.driver.begin_analysis()
+        offline = {"CHALK_CLIENT_ID": "", "ELEVENLABS_API_KEY": "", "PHOTON_API_KEY": ""}
+        with patch.dict(os.environ, offline):
+            with patch("ground_station.chalk_client.evaluate_survey", side_effect=RuntimeError("undeployed")):
+                with patch("ground_station.chalk_eval_mission.justify_score", return_value={
+                    "insight": "Dry sun supports the stress.",
+                    "justified_action": "continue",
+                    "weather_source": "local live weather",
+                }):
+                    async with DroidController(self.driver, pipeline=self.pipeline, session_factory=DecisionSession) as controller:
+                        await controller.handle("Inspect status and wait")
+                        result = await self.pipeline.process_photo(controller, self.path, capture_id)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.pipeline.latest["features"]["justified_action"], "continue")
+        self.assertEqual(self.pipeline.latest["features"]["insight"], "Dry sun supports the stress.")
+
+    async def test_unavailable_weather_still_allows_a_decision(self):
+        self.pipeline.weather = True
+        offline = {"CHALK_CLIENT_ID": "", "ELEVENLABS_API_KEY": "", "PHOTON_API_KEY": ""}
+        capture_phase(self.mission)
+        with patch.dict(os.environ, offline):
+            with patch("ground_station.chalk_client.evaluate_survey", side_effect=RuntimeError("undeployed")):
+                with patch("ground_station.chalk_eval_mission.justify_score", side_effect=RuntimeError("offline")):
+                    async with DroidController(self.driver, pipeline=self.pipeline, session_factory=DecisionSession) as controller:
+                        await controller.handle("Inspect status and wait")
+                        result = await self.pipeline.process_photo(controller, self.path, self.driver.begin_analysis())
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.pipeline.latest["features"]["weather_source"], "unavailable")
+        self.assertEqual(self.pipeline.latest["features"]["justified_action"], "continue")
+
     async def test_capture_analysis_mcp_decision_changes_actual_mission_and_persists(self):
         capture_phase(self.mission)
         capture_id = self.driver.begin_analysis()
@@ -243,7 +277,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 await controller.tools[3].handler({"text": "arbitrary", "recipient": "other"})
 
     async def test_real_reimage_waits_for_approval_and_timeout_revokes_it(self):
-        self.driver.mock = False
+        self.driver = MissionDriver(self.mission, mock=False)
+        self.pipeline.driver = self.driver
         DecisionSession.decisions = ["capture_photo"]
         capture_phase(self.mission)
         async with DroidController(self.driver, pipeline=self.pipeline, session_factory=DecisionSession) as controller:
@@ -312,6 +347,16 @@ class WorkerTests(unittest.TestCase):
             stack.enter_context(patch.object(voice_mission, "SurveyMission", return_value=value))
             stack.enter_context(patch.object(voice_mission, "ROOT", Path(directory)))
             stack.enter_context(patch.object(voice_mission, "load_dotenv"))
+            stack.enter_context(patch.dict(os.environ, {
+                "CHALK_CLIENT_ID": "", "ELEVENLABS_API_KEY": "", "PHOTON_API_KEY": "",
+            }))
+            weather_query = stack.enter_context(patch(
+                "ground_station.chalk_client.evaluate_survey", return_value={
+                    "field_survey.insight": "SIMULATED offline weather context.",
+                    "field_survey.justified_action": "continue",
+                    "field_survey.delivery_error": "",
+                },
+            ))
             stack.enter_context(patch.object(sys, "argv", [
                 "demo", "--fake-analysis", "--no-voice", "--no-photon", "--hz", "200",
             ]))
@@ -360,6 +405,7 @@ class WorkerTests(unittest.TestCase):
             self.assertFalse(workers[0].failed.is_set())
             self.assertEqual(len(DecisionSession.instances[-1].prompts), 2)
             self.assertEqual(len(workers[0].pipeline.context()["history"]), 1)
+            weather_query.assert_called_once()
 
     def test_vision_failure_in_actual_worker_latches_stop(self):
         class BrokenAnalyzer(FakeImageAnalyzer):

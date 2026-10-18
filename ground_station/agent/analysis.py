@@ -95,6 +95,18 @@ class GrokImageAnalyzer:
         await self._http.aclose()
 
 
+class DroidImageAnalyzer:
+    """The open Droid session scores the photo. This object does not call a model."""
+
+    source = "droid"
+
+    async def analyze(self, path: Path, field_id: str) -> SurveyAnalysis:
+        raise AnalysisError("Droid scores photos through the controller")
+
+    async def close(self):
+        return None
+
+
 class FakeImageAnalyzer:
     """Explicit test/demo fixture, never a fallback for failed cloud analysis."""
 

@@ -18,6 +18,7 @@ from chalk.features import DataFrame, features, online
 from chalk.monitoring import Chart, Series
 
 EVALUATE_SURVEY_QUERY = "evaluate_field_survey"
+EVALUATE_SURVEY_WEATHER_QUERY = "evaluate_field_survey_weather"
 
 NamedQuery(
     name=EVALUATE_SURVEY_QUERY,
@@ -33,6 +34,38 @@ NamedQuery(
         "field_survey.health_flag",
         "field_survey.severity",
         "field_survey.recommended_action",
+    ],
+)
+
+NamedQuery(
+    name=EVALUATE_SURVEY_WEATHER_QUERY,
+    input=[
+        "field_survey.id",
+        "field_survey.field_id",
+        "field_survey.drone_id",
+        "field_survey.photo_url",
+        "field_survey.health_score",
+        "field_survey.analysis_summary",
+        "field_survey.latitude",
+        "field_survey.longitude",
+    ],
+    output=[
+        "field_survey.health_flag",
+        "field_survey.severity",
+        "field_survey.recommended_action",
+        "field_survey.nws_temperature_c",
+        "field_survey.nws_wind_mph",
+        "field_survey.nws_forecast",
+        "field_survey.nws_observed_at",
+        "field_survey.gfs_precip_mm",
+        "field_survey.gfs_cloud_cover_pct",
+        "field_survey.gfs_shortwave_wm2",
+        "field_survey.nasa_shortwave_wm2",
+        "field_survey.nasa_observed_at",
+        "field_survey.weather_error",
+        "field_survey.insight",
+        "field_survey.justified_action",
+        "field_survey.delivery_error",
     ],
 )
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -15,7 +16,8 @@ from ground_station.agent.analysis import SurveyAnalysis
 
 class SurveyPipeline:
     def __init__(self, driver, analyzer, *, field_id="field-1", photon=None,
-                 history_path=Path("data/surveys.sqlite3"), chalk=False, chalk_branch=None):
+                 history_path=Path("data/surveys.sqlite3"), chalk=False, chalk_branch=None,
+                 weather=False, deliver=False):
         # Validate the host field identifier before any camera/flight work.
         SurveyAnalysis(field_id=field_id, health_score=0.5, analysis_summary="validation")
         self.driver = driver
@@ -25,6 +27,8 @@ class SurveyPipeline:
         self.history_path = Path(history_path)
         self.chalk = chalk
         self.chalk_branch = chalk_branch
+        self.weather = weather
+        self.deliver = deliver
         self.latest = None
         self.run_id = uuid.uuid4().hex
         self.history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +55,12 @@ class SurveyPipeline:
                 "history": [{"observation": json.loads(row[0]), "decision": row[1]} for row in rows]}
 
     async def process_photo(self, controller, path: Path, capture_id: int) -> dict:
-        analysis = SurveyAnalysis.model_validate(await self.analyzer.analyze(path, self.field_id))
+        if getattr(self.analyzer, "source", "") == "droid":
+            if controller is None:
+                raise RuntimeError("Droid image analysis needs an open controller")
+            analysis = await controller.assess_photo(path, self.field_id)
+        else:
+            analysis = SurveyAnalysis.model_validate(await self.analyzer.analyze(path, self.field_id))
         if analysis.field_id != self.field_id:
             raise ValueError("Analyzer returned another field")
         features = {"source": "local_thresholds", "health_flag":
@@ -61,7 +70,7 @@ class SurveyPipeline:
             "healthy": "continue", "watch": "reimage", "critical": "alert-operator",
         }[features["health_flag"]]
         features["severity"] = round(1 - analysis.health_score, 3)
-        if self.chalk:
+        if self.chalk and not self.weather:
             from ground_station.chalk_quality import evaluate_survey_named
 
             result = await asyncio.wait_for(asyncio.to_thread(
@@ -71,6 +80,8 @@ class SurveyPipeline:
             features = {"source": "chalk", **result}
         if not self.driver.accept_analysis(capture_id):
             return {"ok": False, "reason": "stale_or_stopped_analysis"}
+        if self.weather:
+            self.record_observation(analysis, features, path)
         receipt = f"{self.run_id}:{capture_id}"
         self.latest = {
             "receipt": receipt, "capture_id": capture_id,
@@ -96,6 +107,101 @@ class SurveyPipeline:
             raise RuntimeError("Droid returned without an actionable survey decision")
         return result
 
+    def record_observation(self, analysis: SurveyAnalysis, features: dict, path: Path) -> None:
+        """Chalk joins the Droid score with live weather, stores it, and may phone it.
+
+        A deployed-query failure falls back to the same live weather functions
+        on this laptop. Phone delivery and the volume write never abort flight.
+        """
+        try:
+            self._join_weather(analysis, features, path)
+        except Exception:
+            self._justify_locally(analysis, features)
+        print(
+            f"weather justification: action={features.get('justified_action')} "
+            f"source={features.get('weather_source')}"
+        )
+        if features.get("insight"):
+            print(features["insight"])
+        self._store_volume(analysis, features, path)
+        if self.deliver and _laptop_should_deliver(features):
+            self._deliver_phone(features, path)
+
+    def _join_weather(self, analysis: SurveyAnalysis, features: dict, path: Path) -> None:
+        from ground_station.chalk_client import evaluate_survey
+
+        raw = evaluate_survey(
+            field_id=analysis.field_id,
+            health_score=analysis.health_score,
+            analysis_summary=analysis.analysis_summary,
+            photo_url=str(path),
+            drone_id=getattr(self.driver, "drone_id", ""),
+            include_weather=True,
+        )
+        insight = raw.get("field_survey.insight")
+        justified = raw.get("field_survey.justified_action")
+        if not insight or not justified:
+            raise RuntimeError("chalk insight missing")
+        features["source"] = "chalk"
+        for name in ("health_flag", "severity", "recommended_action"):
+            value = raw.get(f"field_survey.{name}")
+            if value is not None:
+                features[name] = value
+        features["insight"] = insight
+        features["justified_action"] = justified
+        features["weather_source"] = "chalk"
+        if "field_survey.delivery_error" in raw:
+            features["delivery_error"] = raw.get("field_survey.delivery_error")
+        if raw.get("field_survey.weather_error"):
+            features["weather_error"] = raw.get("field_survey.weather_error")
+
+    def _justify_locally(self, analysis: SurveyAnalysis, features: dict) -> None:
+        from ground_station.chalk_eval_mission import justify_score
+
+        try:
+            features.update(justify_score(analysis.health_score, analysis.analysis_summary))
+        except Exception as exc:
+            features["insight"] = "Live weather was unavailable, so the image stands alone."
+            features["justified_action"] = features.get("recommended_action", "continue")
+            features["weather_source"] = "unavailable"
+            features["weather_error"] = str(exc)[:300]
+
+    def _store_volume(self, analysis: SurveyAnalysis, features: dict, path: Path) -> None:
+        if not os.environ.get("CHALK_CLIENT_ID", "").strip():
+            features["volume_error"] = "CHALK_CLIENT_ID is not set; volume write skipped"
+            return
+        record = {
+            "field_id": analysis.field_id,
+            "health_score": analysis.health_score,
+            "analysis_summary": analysis.analysis_summary,
+            "photo_url": str(path),
+            "features": features,
+        }
+        try:
+            from ground_station.agent.store import append_decision, set_last_survey
+
+            set_last_survey(analysis.field_id, record)
+            append_decision({"kind": "survey", **record})
+        except Exception as exc:
+            features["volume_error"] = str(exc)[:300]
+
+    def _deliver_phone(self, features: dict, path: Path) -> None:
+        if not os.environ.get("ELEVENLABS_API_KEY", "").strip():
+            features["delivery_error"] = features.get("delivery_error") or "ELEVENLABS_API_KEY is not set"
+            return
+        try:
+            import sys
+
+            chalk_dir = str(Path(__file__).resolve().parents[2] / "chalk")
+            if chalk_dir not in sys.path:
+                sys.path.append(chalk_dir)
+            import deliver_summary
+
+            error = deliver_summary.deliver(str(features.get("insight") or ""), photo_path=str(path))
+            features["delivery_error"] = error or ""
+        except Exception as exc:
+            features["delivery_error"] = str(exc)[:300]
+
     def send_alert(self) -> dict:
         state = self.driver.snapshot()
         if self.latest is None or self.latest["capture_id"] != state["capture_id"]:
@@ -109,4 +215,14 @@ class SurveyPipeline:
                 "delivery_confirmed": False}
 
     async def close(self):
-        await self.analyzer.close()
+        if self.analyzer is not None:
+            await self.analyzer.close()
+
+
+def _laptop_should_deliver(features: dict) -> bool:
+    """Send from the laptop unless this Chalk query already delivered."""
+    if features.get("weather_source") != "chalk":
+        return True
+    if "delivery_error" not in features:
+        return True
+    return bool(features.get("delivery_error"))

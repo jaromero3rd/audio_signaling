@@ -10,23 +10,24 @@ This table shows what code exists and what's wired together:
 
 | Module | What exists | Current integration boundary |
 |--------|-------------|------------------------------|
-| [Ground-station mission](#ground-station-mission-and-drone-interface) | Tello/webcam adapter, local control, capture and analysis hold | Default Droid control; explicit legacy voice/auto path |
-| [Wheat AprilTag detection](#wheat-head-and-apriltag-detection) | Live `.pt`/AprilTag detection and separate ONNX image detector, training/export scripts | Finds target bounding boxes; does not produce crop-health scores |
-| [Grok Voice](#grok-voice) | Realtime audio session start, status, abort tools | Starts route to persistent Droid; stops bypass cloud |
-| [Chalk feature evaluation](#chalk-feature-evaluation) | Resolvers and validated named query | Invoked per analysis with `--chalk`; local thresholds otherwise |
-| [Chalk mission state](#chalk-volume-backed-mission-state) | Volume-backed snapshots, decision log, latest-survey cache | Storage helpers exist but not called by mission |
-| [Grok team coordination](#grok-team-coordination) | CLI queue/history, read-only bot-branch publisher | Independent developer coordination service; not mission-critical |
-| [Droid and Photon](#how-droid-is-used-at-runtime) | Persistent SDK, Grok image analysis, history, restricted tools and alerts | Connected photo-analysis-decision loop; no incoming Photon commands |
+| [Ground-station mission](#ground-station-mission-and-drone-interface) | Tello/webcam adapter, local control, capture and optional analysis hold | Default Droid control and mock hardware; explicit legacy voice/auto path |
+| [Wheat AprilTag detection](#wheat-head-and-apriltag-detection) | Live ONNX/`.pt`/AprilTag detection, standalone image inference, training/export scripts | Finds target bounding boxes; does not produce crop-health scores |
+| [ElevenLabs voice](#elevenlabs-voice) | Microphone speech-to-text and spoken phone summary | Transcript goes to Droid; stop stays local |
+| [Chalk feature evaluation](#chalk-feature-evaluation) | Image-only labels, live-weather resolver, named-query helper | Crop analysis attempts a weather query even without `--chalk`; local live-weather fallback |
+| [Chalk mission state](#chalk-volume-backed-mission-state) | Snapshot helpers, decision log, latest-survey cache | Crop pipeline attempts survey/cache writes; no automatic flight-snapshot save or restore |
+| [Grok team coordination](#grok-team-coordination) | Local CLI queue/history and checked Git publisher | Independent developer service; publisher can push bot branches, never main |
+| [Droid and Photon](#how-droid-is-used-at-runtime) | Persistent SDK, optional photo assessment, restricted tools, host text notifier | Separate crop-summary bridge can also send photo/audio attachments |
+| [UNO Q sensors](#uno-q-field-stations) | Bluetooth sensors and a separate HTTP telemetry/microphone receiver | Not joined into the active crop pipeline or mission speech input |
 | [Audio signaling](#standalone-audio-signaling) | Speaker-to-microphone ggwave text sender/receiver | Independent utilities; not connected to survey mission |
 
-**Key insight**: The default runtime connects image analysis to persistent Droid decisions and controlled actions/alerts. Chalk Volume remains separate; visual health estimates are not verified diagnoses.
+**Default versus optional:** Droid makes high-level mission requests while local vision steers. Photo assessment, weather context, SQLite survey history, Volume writes, and crop-summary delivery are enabled only by the Droid crop-analysis path. Visual health estimates are not verified diagnoses.
 
 ## Current Runtime Flow
 
-The default Droid path is:
+The default Droid path, with no crop analysis, is:
 
 ```text
-Operator speech or initial SDK instruction
+Operator speech → ElevenLabs scribe_v1 → text
         ↓
 Persistent Factory Droid tools and host approval
         ↓
@@ -36,24 +37,33 @@ Webcam mock or Tello camera
         ↓
 YOLO wheat-head or AprilTag detection
         ↓
-Local steering, photo capture, fixed-deadline hover
+Local steering → photo capture → home search → landing
+```
+
+With `--crop-analysis` (or `--fake-analysis` for a mock score), photo capture instead enters:
+
+```text
+Saved photo → await_analysis (fixed 90-second deadline)
         ↓
-Grok Responses image analysis → validated score/summary
+Droid scores the attached JPEG (structured SurveyAnalysis; host keeps field_id)
         ↓
-Local survey history + optional Chalk features → same Droid session
+Host accepts the current capture; Chalk weather query or local live-weather fallback
         ↓
-Reimage / host-formatted Photon alert / return home / land
+Best-effort Chalk Volume writes and separate phone-summary send
+        ↓
+SQLite observation → same Droid session reviews survey context
+        ↓
+Bounded reimage / text alert / return home / land → SQLite decision
 ```
 
 Photo handling currently:
 - Saves the still image to disk
 - Records its path in the mission log
-- Prints the path to stdout
+- With `--crop-analysis`, attaches that file to the Droid session (5 MiB JPEG/PNG/GIF/WebP limit)
 
-The host sends image bytes to xAI, then validated analysis and features to Droid. Droid does not receive raw photos or choose image paths. Photon receives host-formatted text, not image attachments. Explicit `--controller voice` retains the legacy direct voice/auto path without this analysis loop.
+The active mission does not call `api.x.ai`. `GrokImageAnalyzer`, `voice_grok.py`, and other older xAI helpers remain available but are not selected by this launcher. Explicit `--controller voice` uses the local state machine directly and ElevenLabs for microphone transcription; it does not construct the SDK crop pipeline.
 
-It does **not**:
-- Save mission state to Chalk
+`--fake-analysis` replaces only the photo assessment. It does not disable Factory inference, public weather calls, Volume writes, or the phone-summary sender. Use mocked providers in the offline tests for an isolated pipeline check.
 
 ## Ground-station mission and drone interface
 
@@ -67,11 +77,12 @@ It does **not**:
 - **Target search**: Rotate and scan for a target (wheat or AprilTag)
 - **Target approach**: Move closer while keeping the target centered
 - **Photo capture**: Stabilize and snap an image when the target is in frame and well-sized
-- **Home search**: Rotate to find the home marker (usually a different tag)
+- **Optional analysis hold**: Hover while the crop pipeline runs; abort when the fixed deadline expires
+- **Home search**: Turn and scan for the home marker (target and home both default to tag 12)
 - **Home approach**: Move back to base
 - **Landing or abort**: Safe touchdown or manual recovery
 
-Each camera-loop tick produces a requested action—yaw, forward, and vertical steering values. The entrypoint sends these actions to either a `TelloDrone` adapter (for live Tello flight) or a `MockDrone` (for simulation).
+Each camera-loop tick produces bounded yaw, forward, vertical, and lateral steering values. The entrypoint sends these to either a `TelloDrone` adapter (for live flight) or a `MockDrone` (for simulation). Droid requests mission-level actions, not raw remote-control values.
 
 ### Drone Adapters
 
@@ -92,9 +103,9 @@ The controller (`control.py`) uses the target's position and apparent size in th
 - **Forward**: Approach the target if it's far; back away if it's too close
 - **Vertical**: Adjust altitude toward target center-y
 
-The mission also handles frame-absence timeouts—if no target is seen for N frames, the mission enters search mode.
+The mission also handles frame-absence timeouts. If no target is seen for N frames, the mission enters search mode.
 
-Both wheat-head and AprilTag steering is delegated to [steer_wheat.py](ground_station/steer_wheat.py) and [steer_tag.py](ground_station/steer_tag.py).
+The active survey loop uses `mission.py` and `control.py` for steering. [steer_wheat.py](ground_station/steer_wheat.py) and [steer_tag.py](ground_station/steer_tag.py) are separate steering entrypoints, not the mission's control backend.
 
 ## Wheat-head and AprilTag detection
 
@@ -104,9 +115,10 @@ Both wheat-head and AprilTag steering is delegated to [steer_wheat.py](ground_st
 
 Two paths exist:
 
-1. **Live mission path**: `YoloWheatHeadDetector` loads an Ultralytics `.pt` checkpoint, predicts wheat-head bounding boxes, and combines boxes into a target region for steering.
-   - Default checkpoint: `models/wheat_detection.pt`
-   - If the checkpoint is absent, the mission falls back to AprilTag detection.
+1. **Live mission path**: `YoloWheatHeadDetector` uses ONNX Runtime for `.onnx` files or Ultralytics for `.pt` files, predicts wheat-head bounding boxes, and combines boxes into a target region for steering.
+   - Default weights: `models/wheat_detection.onnx` when present, otherwise `models/wheat_detection.pt`.
+   - With `--target auto`, a missing checkpoint selects AprilTag detection.
+   - Explicit `--target wheat` without weights selects a simple HSV color detector for computer tests, not trained wheat detection.
    - This path **does not** export to ONNX automatically.
 
 2. **Standalone ONNX inference**: [detect.py](wheat_detection/detect.py) uses ONNX Runtime with [models/wheat_detection.onnx](models/wheat_detection.onnx).
@@ -114,7 +126,7 @@ Two paths exist:
    - Filters detections by confidence
    - Removes overlapping boxes
    - Returns bounding boxes in original-image coordinates
-   - This ONNX detector is **not** the live mission's backend; it's provided for offline analysis.
+   - The live mission reuses this detector when its selected weights are ONNX.
 
 ### AprilTag Detection
 
@@ -127,41 +139,38 @@ Uses OpenCV's AprilTag dictionaries. Tags can serve as both survey targets (whea
 
 **Detection is not crop-health analysis.**
 
-Bounding boxes and head counts do not supply health scores. The separate [image analyzer](ground_station/agent/analysis.py) sends the captured JPEG/PNG to Grok Responses and validates a finite score in `[0, 1]` plus a bounded summary. The [pipeline](ground_station/agent/pipeline.py) binds it to a host capture and provides it to Droid and optional Chalk.
+Bounding boxes and head counts do not supply health scores. With `--crop-analysis`, `DroidController.assess_photo()` uses `session.stream(..., images=[Image.from_path(...)], output=SurveyAnalysis)`. The host validates a finite score in `[0, 1]`, a 1–3,000-character summary, and the host-owned `field_id`. Attachments must be nonempty JPEG/PNG/GIF/WebP files no larger than 5 MiB. The selected Droid model must support images and structured output; there is no automatic second vision provider.
 
-## Grok Voice
+`--fake-analysis` skips this assessment call and returns a fixed score of `0.8` with a `SIMULATED` summary. It is rejected with real hardware.
 
-**Source**: [voice_grok.py](ground_station/voice_grok.py).
+## ElevenLabs voice
+
+**Source**: [voice_eleven.py](ground_station/voice_eleven.py).
 
 ### Overview
 
-`GrokVoiceBridge` opens an authenticated realtime WebSocket session with xAI's Grok service, streams microphone PCM audio, and receives transcriptions and tool calls.
+The laptop records a silence-delimited utterance and posts it to ElevenLabs speech-to-text (`scribe_v1`). Only explicit commands such as "survey the wheat", "start survey", or "take off" queue a start. Status questions and negated start requests do not authorize flight. Stop / abort / land / emergency keywords stop locally; other sentences become status turns for Droid.
 
-### Tool Bindings
+Recording uses 16 kHz mono PCM, a 0.7-second silence boundary, and a maximum utterance of about 15 seconds. This is an utterance-based HTTP call, not the older realtime Grok WebSocket bridge.
 
-The bridge registers three tools that the Grok model can call:
-
-- `start_survey`: Initiates the mission state machine (takeoff, search, photo, land).
-- `get_mission_status`: Returns current mission phase and any recent error.
-- `abort_mission`: Cleanly shuts down flight and lands the drone.
-
-Grok interprets spoken requests, transcribes them, and decides which tool to call. For example, "start survey" → `start_survey()`.
+The spoken phone summary is a separate ElevenLabs text-to-speech call (`eleven_multilingual_v2`) made while Chalk, or the laptop fallback, delivers the insight. Phase chatter is printed on the laptop and is not spoken to the phone.
 
 ### Prerequisites
 
-- `XAI_API_KEY`: API key for xAI (required to authenticate the WebSocket).
-- Microphone and speaker access (system audio permission).
-- Internet connection to reach xAI's WebSocket endpoint.
+- `ELEVENLABS_API_KEY` when voice is on.
+- `ELEVENLABS_VOICE_ID` for the spoken summary.
+- Microphone access. `--no-voice` skips speech-to-text.
 
 ### Limitations
 
-- The voice bridge is an input adapter, not the Droid session itself.
-- In default mode, captured photos are analyzed through a separate Grok Responses call.
-- The mission's internal state machine drives flight, not Grok's reasoning.
+- ElevenLabs does not fly and does not see the photo.
+- `voice_grok.py` remains in the tree and is not started.
+- A spoken abort bypasses Droid reasoning **after transcription**, but still depends on the microphone and ElevenLabs response. Space in the focused camera window is the cloud-independent stop.
+- `--no-voice` disables microphone transcription, not summary text-to-speech, and changes real-flight approval behavior as described below.
 
 ## Chalk Feature Evaluation
 
-**Source**: [features.py](chalk/features.py), [chalk_client.py](ground_station/chalk_client.py), [named_queries.py](chalk/named_queries.py), [chalk_quality.py](ground_station/chalk_quality.py), [chalk_eval.py](ground_station/chalk_eval.py).
+**Source**: [features.py](chalk/features.py), [weather_live.py](chalk/weather_live.py), [chalk_client.py](ground_station/chalk_client.py), [named_queries.py](chalk/named_queries.py), [chalk_quality.py](ground_station/chalk_quality.py), [chalk_eval.py](ground_station/chalk_eval.py).
 
 ### Survey Schema
 
@@ -169,14 +178,17 @@ Grok interprets spoken requests, transcribes them, and decides which tool to cal
 - `id`: Unique survey identifier (UUID)
 - `field_id` / `drone_id`: Mission context
 - `photo_url`: Reference to the captured image
-- `health_score`: Supplied confidence (0.0–1.0) for crop health
+- `health_score`: Supplied crop-health estimate (0.0–1.0), not calibrated confidence
 - `analysis_summary`: Human-readable findings or model output
+- `latitude` / `longitude`: Field point for the live-weather resolver. The mission default is the David Rubenstein Treehouse.
 - `ts`: Feature timestamp
 - Decision-related outputs (feature flags, action recommendations)
+- `insight` and `justified_action`: Weather explanation of the image score
+- Weather measurements/timestamps, `weather_error`, and `delivery_error`
 
 ### Feature Computation
 
-`evaluate_survey()` sends inputs to a deployed Chalk feature service and requests three computed features:
+`evaluate_survey()` sends the Droid score to a deployed Chalk feature service. Image-only queries request three computed features:
 
 | Feature | Resolver behavior |
 |---------|-------------------|
@@ -184,7 +196,33 @@ Grok interprets spoken requests, transcribes them, and decides which tool to cal
 | `severity` | 1.0 − health_score, clamped [0, 1], rounded to 3 decimals |
 | `recommended_action` | `continue`, `reimage`, or `alert-operator`, based on health_flag |
 
-These are deterministic online resolvers. Chalk does **not** examine the photo or generate a health score; the caller must supply the analysis. Returned action labels do not themselves execute commands or send alerts.
+These are deterministic online resolvers. Chalk does **not** examine the photo or generate a health score; the caller must supply the analysis. Image-only action labels do not execute commands. The separate weather resolver also attempts phone delivery, so a weather-enabled query is not necessarily read-only.
+
+### Live Weather Context
+
+`justify_image_with_live_weather` fetches NWS, GFS, and NASA data, writes `insight` and `justified_action`, and attempts the phone send. An empty `delivery_error` means the sender reported acceptance, not confirmed delivery. The laptop attempts delivery when the weather source is local, the field is absent, or it reports an error. No weather dataset is checked into the repository.
+
+The default point is the David Rubenstein Treehouse, 20 Western Avenue, Allston, at 42.3635, -71.1253. If `api.weather.gov/points` rejects that coordinate, the resolver refetches Harvard Yard at 42.3744, -71.1169 and the insight says the Treehouse grid was unavailable.
+
+Three public sources are read at query time:
+
+- NOAA NWS forecast and the latest station observation from `api.weather.gov`. No key. The client sends the User-Agent `AgriDrone HackHarvard 2026 (field survey)`.
+- NOAA GFS through Open-Meteo `models=gfs_seamless`: precipitation, cloud cover, and shortwave radiation. Open-Meteo data is CC BY 4.0. GFS assimilates satellite observations. It is a model, not a raw satellite image.
+- NASA POWER hourly `ALLSKY_SFC_SW_DWN`, satellite-derived surface sunlight. The newest valid hour inside the last 120 days is kept, and the insight cites that timestamp. This source can lag substantially; it is not guaranteed to describe current conditions.
+
+Current sunlight rules prefer GFS over lagged NASA values. `justified_action` can request a reimage for a healthy score under poor light, or for a critical score with storm/high-wind interference. It does not replace `health_flag`, `severity`, or `recommended_action`; Droid receives the combined context and still chooses bounded actions.
+
+The launcher constructs `SurveyPipeline(weather=True, deliver=True)` whenever Droid crop analysis is enabled. It calls `evaluate_survey(..., include_weather=True)` even without `--chalk`. If the query fails or omits the insight, the laptop uses the same live-weather functions and labels the source `local live weather`; unavailable weather leaves an image-only explanation.
+
+**Flag boundary:** the `--chalk` named-query branch runs only when the pipeline's `weather` option is false. The current launcher's weather path does not forward `--chalk-branch` and does not use `evaluate_survey_named()` validation. Do not assume those flags select or strictly validate the active weather query.
+
+Cloud feature deployment, outbound weather access, and summary-delivery dependencies must be verified separately. A cloud resolver receives the laptop's photo path as a string, not an uploaded image; that file normally does not exist in Chalk. The local sender can use the actual capture. Weather, Volume, and summary failures are best effort, but their latency can still consume the fixed analysis-hold deadline.
+
+```bash
+python -m ground_station.weather_smoke
+```
+
+This command calls public weather APIs, prints current readings and sample justifications, and needs no Chalk credentials. It does not invoke the delivery resolver or send phone messages.
 
 ### Feature Deployment
 
@@ -194,12 +232,13 @@ Feature definitions are deployed separately via the [chalk/](chalk/) directory a
 cd chalk && chalk apply --branch schedtest
 ```
 
-Simply calling the Python helper does **not** deploy resolvers or configure storage. You must have a Chalk workspace and the CLI installed.
+Simply calling the Python helper does **not** deploy resolvers or configure storage. You must have a Chalk workspace and the CLI installed. `chalk/chalk.yaml` selects Python 3.12. `schedtest` is a development branch used by the smoke helper, not evidence that the current weather features are deployed or that the mission queries that branch.
 
 ### Named Query, Monitoring, Evaluation
 
-- `evaluate_field_survey`: Provides a stable query name for feature evaluation.
-- `evaluate_survey_named()`: Invokes the named query, checks score ranges, validates returned values.
+- `evaluate_field_survey`: Preserves the image-only inputs and three decision outputs; no coordinates or phone-send side effects.
+- `evaluate_field_survey_weather`: Separate weather-enabled query with coordinates, context, and best-effort summary delivery.
+- `evaluate_survey_named()`: Selects the weather query only with `include_weather=True`, checks score ranges, and validates image-label outputs. Both query definitions require deployment before use.
 - Monitoring definition: Charts the named query's success ratio (not crop-model accuracy or mission completion).
 - Daily heartbeat resolver: Declared in `chalk/named_queries.py` as an `@online(cron="1d")` resolver; existence does not prove it's scheduled.
 
@@ -213,9 +252,9 @@ These are cloud evaluation calls, not offline unit tests. The `schedtest` branch
 
 ### Important Limitation
 
-These are query-time feature computations — nothing is persisted, because this Chalk environment has no online or offline store configured.
+Feature resolvers compute query-time outputs. The repository's helper notes describe a Chalk environment without an online/offline feature store; resolver code alone does not establish durable feature history.
 
-Persisting survey features for later analysis requires appropriate storage configuration. The separate Volume storage (see below) is for mission state snapshots and decision logs, not a feature time-series database.
+The mission separately persists SQLite history and attempts Volume writes (below). A Volume record is not a configured feature time-series store.
 
 ## Chalk Volume-backed Mission State
 
@@ -227,9 +266,9 @@ This module provides durable JSON-file storage via Chalk's Volume gRPC API:
 
 | Stored file | Purpose |
 |-------------|---------|
-| `mission_state.json` | Latest mission snapshot (flight phase, battery, GPS, etc.) |
-| `decision_log.jsonl` | Decision entries with timestamps |
-| `fields/<field_id>.json` | Most recently cached survey result per field |
+| `mission_state.json` | Generic mission snapshot helper; not automatically written by the current launcher |
+| `decision_log.jsonl` | Append-style decision log, including the crop pipeline's survey records |
+| `fields/<field_id>.json` | Most recently cached joined survey result per field |
 
 Volume is created on first use if it doesn't exist. Environment variable `CHALK_STATE_VOLUME` overrides the default name (`droid-mission-state`).
 
@@ -250,7 +289,9 @@ Volume is created on first use if it doesn't exist. Environment variable `CHALK_
 
 ### Integration Status
 
-The current mission does **not** call these helpers. Storage helpers exist, but the local flight loop does not persist state to Volume.
+With crop analysis enabled, `SurveyPipeline._store_volume()` calls `set_last_survey()` and `append_decision()` after the weather join. It checks for `CHALK_CLIENT_ID` before trying; the write still requires valid Chalk authentication and Volume access. Missing credentials or failed writes become `volume_error` rather than aborting the mission.
+
+The launcher does not call `save_mission_state()` or `load_mission_state()`. These survey records do not restore flight state or resume a mission. Local observations and Droid decisions are stored separately in `data/surveys.sqlite3`.
 
 ## Grok Team Coordination
 
@@ -290,22 +331,65 @@ A deterministic publisher can check committed changes in owned worktrees and pus
 
 ## How Droid Is Used at Runtime
 
-The embedded mission controller is implemented in [agent/controller.py](ground_station/agent/controller.py), with a mock-first [session launcher](ground_station/agent/session.py). See the [SDK runtime guide](ground_station/agent/README.md) for commands, limits, local approval, environment configuration, and tests.
+The embedded controller is implemented in [agent/controller.py](ground_station/agent/controller.py), with a mock-first [session launcher](ground_station/agent/session.py). [worker.py](ground_station/agent/worker.py) owns its long-lived session on a background thread. The older `droid_session.py` is not the active controller.
 
-One official `droid-sdk` session handles initial instructions, voice starts and validated image analyses. Four tools read status, request bounded commands, read survey context/history, or queue the current analysis alert. The camera/RC loop remains separate from model latency. After capture it hovers with a fixed 90-second deadline; reimages never extend it. Real starts/photos require local approval; stop/failure latches cannot be cleared by the model. Observations and decisions persist locally in ignored `data/surveys.sqlite3`.
+One `droid-sdk[mcp]==0.5.0` session handles initial instructions, voice requests, optional photo assessment, and subsequent survey decisions. The camera/RC loop remains separate from model latency.
 
-[Photon notifications](ground_station/photon.py) include fixed status messages and host-formatted validated analysis text sent to one verified private human/agent direct space. Droid's alert tool accepts no recipients, paths, credentials, or arbitrary text. Configured mock runs send real iMessages marked `MOCK`; use `--no-photon` for local-only runs.
+| Mission tool | Authority |
+|--------------|-----------|
+| `get_mission_status()` | Reads logical mission state, limits, stop latch, and pending approval; not independent physical telemetry |
+| `issue_drone_command(drone_id, action)` | Only `start_survey`, `capture_photo`, `continue_survey`, `land`, or `abort` for the configured drone |
+| `get_survey_context()` | Current validated assessment/features and the latest five field-scoped SQLite records, or a placeholder when no pipeline is configured |
+| `send_photon_alert()` | Queues current-analysis text through the host notifier; accepts no recipients, paths, or arbitrary text and does not confirm delivery |
+
+The session restricts execution to these mission tools plus SDK `ToolSearch`/`Script` support for invoking them. Shell, file tools, task delegation, and foreign MCP servers are not authorized. Startup checks the effective tool inventory. The CLI runs in a temporary directory with known unrelated service credentials cleared; this is a tool-policy boundary, not an OS sandbox.
+
+The host permits one survey, two extra photos, 12 mission-tool calls per turn, and 16 model turns. Photo-assessment turns also consume that turn budget. The default turn timeout is 60 seconds. During crop analysis the local loop hovers with a fixed 90-second deadline; reimages never extend it. Invalid analysis, controller failure, or a decision turn with no actionable result stops the mission.
+
+### Entrypoint and Approval Behavior
+
+| Mode | Current behavior |
+|------|------------------|
+| Default `demo.py` or SDK launcher | Droid controller, webcam mock unless `--allow-real-flight`; no crop pipeline unless requested |
+| Droid with voice enabled | Waits for a spoken request by default; real starts/photos need local `y` approval, expiring after 60 seconds |
+| Droid with `--no-voice` | Requests one survey at startup and sets `auto_approve=True`, **including on real hardware**; a host fallback can issue the start if Droid has not |
+| Explicit `--controller voice` | Legacy direct mission gateway; `--no-voice` requires `--auto`, and omitting `--mock` selects real Tello without the Droid approval gate |
+
+`--auto` is rejected in Droid mode. Space latches a stop; `q`/Escape stops and exits. In the voice-enabled approval path, starts require the camera/battery preflight check. Do not assume the `--no-voice` auto-approval path provides the same gate. Avoid remote `--droid-machine` / `--droid-e2b` for flight: the mission MCP tools remain on this laptop's loopback interface.
+
+### Photon Delivery Paths
+
+[photon.py](ground_station/photon.py) sends fixed mission-status messages and host-formatted current-analysis text to one verified private human/agent direct space. Configured mock notifications carry `MOCK`. Its bounded queue retries transient failures and deduplicates events within a run; it is not a durable outbox.
+
+The separate crop-summary path is [deliver_summary.py](chalk/deliver_summary.py) → [photon_alert.py](ground_station/photon_alert.py) → `photon-imessage-agent/src/alert.ts`. It synthesizes an MP3 with ElevenLabs, uploads the capture and audio, and sends insight text. It needs Bun 1.3+, installed package dependencies, the package's private Photon configuration, and a saved operator-space/agent checkpoint. The Python helper does not pass `--space`/`--agent` overrides.
+
+`--photon-env` configures only the host notifier. Bun loads `photon-imessage-agent/.env` separately. The summary helper also checks process-level `PHOTON_API_KEY`, `ELEVENLABS_API_KEY`, and `ELEVENLABS_VOICE_ID`. An empty `delivery_error` reports sender acceptance, not delivery; partial sends can occur before a later error.
+
+**`--no-photon` disables only the host notifier.** Crop analysis still constructs the weather/delivery path, including potential cloud-resolver sends. `--mock`, `--fake-analysis`, and `--no-voice` do not sandbox or disable that sender. Use the default no-analysis path or mocked providers when real messaging is not intended. Incoming Photon messages do not control the mission; the package's echo receiver is a separate service.
 
 `python -m ground_station.agent.session --check-sdk` verifies the effective tool boundary without opening hardware or running inference. `python -m ground_station.photon --check` checks the configured assignment and routing without sending a message.
 
-Droid and Chalk must not perform per-frame steering. AprilTag alignment, movement commands, landing, and aborts remain inside the deterministic local control loop.
+Droid and Chalk do not perform per-frame steering. AprilTag alignment, movement commands, landing, and abort handling remain inside the local control loop. Additional [SDK/host-notifier notes](ground_station/agent/README.md) include older Grok and approval descriptions that do not all match the current launcher.
 
 ### Current Gaps
 
-- Live Grok image assessments are not validated agronomic diagnoses; the authenticated SDK smoke test simulates vision and Photon.
-- Chalk querying requires `--chalk` and a deployed named query. Chalk Volume storage and automatic flight resumption remain separate.
-- No Photon image attachments or incoming mission commands. Notification delivery is best effort, not a durable outbox.
+- Droid image scores are model estimates, not validated agronomic diagnoses. The authenticated SDK smoke test simulates the image provider and Photon transport.
+- The active weather join does not honor `--chalk-branch` or the separate named-query validator. Deployment and cloud egress are not established by local tests.
+- A cloud resolver cannot read a laptop-local photo path. Full cloud summary delivery additionally needs Bun, package files, credentials, and routing available there.
+- `--no-photon` is not a global delivery switch; fake image analysis can still cause real weather, storage, and messaging work.
+- Real `--no-voice` runs auto-approve starts/photos, unlike the voice-enabled approval path.
+- Volume writes and notification delivery are best effort. Automatic flight resumption and incoming phone mission commands are not implemented.
+- Weather, storage, and sender latency can exhaust the analysis-hold deadline; independent local timeout/stop handling remains essential.
 - The PRD describes demo criteria and acceptance targets, not a completed demo checklist.
+
+## UNO Q Field Stations
+
+These are separate hardware experiments, not dependencies of the default webcam/Tello survey:
+
+- [dht11_temp_only](dht11_temp_only/README.md) reads DHT11 and photoresistor values and streams JSON over Bluetooth. [bt_sensor_recv.py](ground_station/bt_sensor_recv.py) supports BLE discovery (`--scan`) with the optional `bleak` dependency, or classic serial (`--com COM5`) with `pyserial`.
+- [uno_q_field_station](uno_q_field_station/README.md) bridges MCU sensor readings to UNO Q Linux, with HTTP telemetry transfer, raw microphone transfer, and offline buffering. [sensor_recv.py](ground_station/sensor_recv.py) receives `/telemetry` and `/mic` and stores local JSONL/PCM files.
+
+The HTTP receiver does not feed its microphone bytes to `ElevenVoiceBridge`, and sensor telemetry is not joined into the current Droid/Chalk crop assessment. Some component guides still name the earlier Grok voice path; the active mission microphone uses ElevenLabs.
 
 ## Standalone Audio Signaling
 
@@ -320,7 +404,7 @@ They are **independent speaker/microphone experiments**, not a radio link, photo
 
 ## Local Setup Entrypoints
 
-All commands run from the repository root. Create a virtual environment and install [requirements.txt](requirements.txt). For ONNX inference, dataset tools, or training, also install [wheat_detection/requirements.txt](wheat_detection/requirements.txt).
+All commands run from the repository root in an activated virtual environment. Install [requirements.txt](requirements.txt); prefer Python 3.11+ because some analysis helpers use `asyncio.timeout`. For dataset tools or training, also install [wheat_detection/requirements.txt](wheat_detection/requirements.txt).
 
 Root requirements do not pin the Chalk SDK version; verify compatibility in your environment.
 
@@ -328,14 +412,16 @@ Root requirements do not pin the Chalk SDK version; verify compatibility in your
 
 | Component | Configuration needed |
 |-----------|----------------------|
-| Webcam/tag demo without voice | Webcam access (OpenCV display); no cloud credentials |
-| Grok Voice | `XAI_API_KEY`, audio-device access, internet |
-| Chalk helpers | `CHALK_CLIENT_ID`, `CHALK_CLIENT_SECRET`, real `CHALK_ENVIRONMENT` ID, `CHALK_STATE_VOLUME` name |
+| Legacy webcam/tag demo without voice | Webcam access and OpenCV display; no cloud credentials |
+| ElevenLabs voice input | `ELEVENLABS_API_KEY`, microphone access, internet; no voice ID needed for transcription |
+| Chalk queries / Volume | `CHALK_CLIENT_ID`, `CHALK_CLIENT_SECRET`, real `CHALK_ENVIRONMENT` ID; optional `CHALK_STATE_VOLUME` override |
 | Grok team CLI | Local Grok CLI installed; see [grok-team/README.md](grok-team/README.md) |
-| Factory Droid controller | Authenticated `droid` CLI or `FACTORY_API_KEY`; pinned `droid-sdk[mcp]`; xAI key for vision unless explicit mock fixture |
+| Factory Droid controller | Authenticated `droid` CLI or `FACTORY_API_KEY`; pinned `droid-sdk[mcp]`; image-capable model for `--crop-analysis` |
 | Photon system notifications | Private Beta assignment and existing direct space; see the [runtime guide](ground_station/agent/README.md) |
+| Crop phone summary | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, process-level `PHOTON_API_KEY`, Bun, and configured/checkpointed `photon-imessage-agent` |
+| UNO Q Bluetooth receiver | `bleak` for BLE or `pyserial` for classic serial; neither is in root requirements |
 
-Setting environment variables does not enable missing integrations; it just makes them available if called.
+Use [.env.example](.env.example) for the root configuration template and keep credentials private. Root `.env` is loaded by the mission, but the Bun messaging package uses its own configuration. Setting variables does not deploy features or provision a phone conversation.
 
 ### Quickstart: Webcam Mock
 
@@ -344,7 +430,7 @@ python demo.py --controller voice --mock --target tag --target-tag 12 --home-tag
 ```
 
 Needs:
-- Python 3.10+
+- An activated Python environment with root dependencies
 - OpenCV
 - A printed AprilTag (family `36h11`, ID 12)
 
@@ -356,23 +442,22 @@ python ground_station/print_apriltag.py --id 12
 
 This opens your webcam, prints simulated flight commands, and steers toward the tag if visible.
 
-### Add Voice (xAI Required)
+### Add Voice (ElevenLabs Required)
 
-Omit `--no-voice` and `--auto`:
+Authenticate Factory and configure `ELEVENLABS_API_KEY` privately, then switch to the default Droid controller:
 
 ```bash
-export XAI_API_KEY=<your_key>
-python demo.py --mock --target tag --target-tag 12 --home-tag 12
+python demo.py --mock --target tag --target-tag 12 --home-tag 12 --no-photon
 ```
 
-Say "start survey" when prompted.
+Say "start survey" when prompted. `ELEVENLABS_VOICE_ID` is only required for spoken phone summaries, not voice input.
 
 ### Real Tello (Caution)
 
-Enable hardware explicitly and approve the pending request with local `y`:
+Use the voice-enabled Droid path, enable hardware explicitly, speak a survey request, then approve the pending request with local `y`:
 
 ```bash
-python demo.py --allow-real-flight --target tag --target-tag 12 --home-tag 12 --no-voice
+python demo.py --allow-real-flight --target tag --target-tag 12 --home-tag 12 --no-photon
 ```
 
 **Requirements**:
@@ -381,21 +466,27 @@ python demo.py --allow-real-flight --target tag --target-tag 12 --home-tag 12 --
 - Clear flying space (5m+ radius)
 - Visible AprilTag
 
-**This actually flies.** Review the code, test indoors, and ensure you're authorized before running.
+**This actually flies.** Review the code, test the mock first, and use an authorized controlled area with operator supervision. Do not add `--no-voice` expecting the same approval gate: the current code then auto-approves starts and extra photos.
 
 ## All Entrypoints and Smoke Tests
 
 | Command | Effect | Prerequisites |
 |---------|----|---|
 | `python demo.py --controller voice --mock --target tag --target-tag 12 --home-tag 12 --no-voice --auto --no-photon` | Legacy local mission on webcam | OpenCV, printed AprilTag |
-| `python -m ground_station.agent.session --no-voice --fake-analysis --no-photon` | SDK-driven webcam loop, simulated assessment | Factory authentication, OpenCV |
+| `python -m ground_station.agent.session --no-voice --no-photon` | SDK-driven webcam survey, no photo assessment/weather/summary | Factory authentication, OpenCV, visible target |
+| `python -m ground_station.agent.session --no-voice --crop-analysis` | Webcam survey plus real Droid photo assessment, weather and best-effort summary/storage | Image-capable Droid model; integration credentials as needed; can send real messages |
+| `python -m ground_station.agent.session --no-voice --fake-analysis` | Same crop pipeline with a simulated image score, not isolated providers | Factory authentication, OpenCV; can still call weather/storage/messaging |
 | `python tests/live_droid_pipeline.py` | Headless real SDK decision/alert integration, simulated providers | Factory authentication; no hardware or real messaging |
 | `python wheat_detection/detect.py path/to/field.png` | ONNX image inference | ONNX dependencies, input image |
 | `python wheat_detection/predict.py path/to/field.png --device cpu` | Ultralytics inference | `.pt` checkpoint |
 | `python -m ground_station.chalk_eval` | Authenticated cloud Chalk queries | Chalk credentials, deployed features |
 | `python -m ground_station.chalk_quality` | Named-query smoke call on `schedtest` | Chalk credentials |
+| `python -m ground_station.weather_smoke` | Public NOAA/GFS/NASA readings and sample weather explanations; no phone send | Internet, root Python dependencies; no Chalk credentials |
+| `python -m unittest discover -s tests -v` | Offline mission/controller/Photon tests | Root Python dependencies |
+| `python -m unittest discover -s test -p 'test_*.py' -v` | Additional offline Chalk/vision-helper/voice/weather/summary tests | Root Python dependencies |
+| `python -m ground_station.bt_sensor_recv --scan` | Nearby BLE discovery; no drone control | Bluetooth access, `bleak` |
 
-The SDK launcher runs the connected runtime; the headless test proves authenticated SDK decisions with simulated providers. Other commands exercise individual components. Cloud helper smoke calls are not prerequisites for the legacy local webcam demo.
+The SDK launcher runs the connected runtime; the opt-in headless SDK test exercises authenticated decisions with simulated providers and does not prove live image assessment or message delivery. Public-weather smoke calls do not validate Chalk deployment. The separate weather-enabled named query can attempt summary delivery; image-only cloud smoke helpers do not request it.
 
 ## Repository Structure
 
@@ -407,9 +498,11 @@ audio_signaling/
 ├── ground_station/
 │   ├── voice_mission.py                 # Voice or SDK mission/control loop
 │   ├── photon.py                        # Host-owned system notifications
+│   ├── photon_alert.py                  # Bun photo/audio summary bridge
 │   ├── mission.py                       # State machine and phases
 │   ├── control.py                       # Steering calculations
-│   ├── voice_grok.py                    # Grok Voice bridge
+│   ├── voice_eleven.py                  # ElevenLabs speech-to-text
+│   ├── voice_grok.py                    # Unused by the mission
 │   ├── vision.py                        # Vision helpers
 │   ├── apriltag.py                      # AprilTag detection
 │   ├── steer_wheat.py                   # Wheat-head steering
@@ -417,18 +510,30 @@ audio_signaling/
 │   ├── chalk_client.py                  # Feature query helper
 │   ├── chalk_quality.py                 # Named-query smoke test
 │   ├── chalk_eval.py                    # Labeled eval
+│   ├── chalk_eval_mission.py            # Local weather justification / legacy logging helper
+│   ├── weather_smoke.py                 # Public-feed smoke check, no message send
+│   ├── sensor_recv.py                   # UNO Q HTTP telemetry and raw microphone receiver
+│   ├── bt_sensor_recv.py                # BLE / classic-serial sensor receiver
 │   └── agent/
-│   │   ├── session.py                   # Mock-first SDK entrypoint
-│   │   ├── controller.py                # Persistent session and restricted MCP tools
-│   │   ├── driver.py                    # Host approval and bounded mission commands
-│   │   ├── worker.py                    # Off-thread SDK lifecycle
-│   │   ├── README.md                    # Runtime and Photon setup guide
-│   │   ├── store.py                     # Chalk Volume state helpers
-│   │   └── NOTES.md                     # Storage investigation caveats
+│       ├── session.py                   # Mock-first SDK entrypoint
+│       ├── controller.py                # Persistent session, photo assessment and MCP tools
+│       ├── driver.py                    # Host approval and bounded mission commands
+│       ├── worker.py                    # Off-thread SDK lifecycle
+│       ├── analysis.py                  # Assessment schema, Droid/fake markers, older Grok analyzer
+│       ├── pipeline.py                  # Weather join, SQLite, Volume and summary orchestration
+│       ├── README.md                    # Additional SDK and host-notifier notes
+│       ├── store.py                     # Chalk Volume state helpers
+│       └── NOTES.md                     # Storage investigation caveats
 ├── chalk/
 │   ├── features.py                      # Survey schema and resolvers
 │   ├── named_queries.py                 # Query, chart, heartbeat definitions
+│   ├── weather_live.py                  # NOAA/NASA fetch and weather justification rules
+│   ├── deliver_summary.py               # ElevenLabs audio and Photon summary sender
 │   └── chalk.yaml                       # Feature deployment config
+├── photon-imessage-agent/               # Separate Bun echo agent and attachment sender
+├── dht11_temp_only/                     # UNO Q Bluetooth sensor app
+├── uno_q_field_station/                 # UNO Q HTTP telemetry / mic-transfer app
+├── config/dongles.json                  # Tello USB Wi-Fi dongle mapping
 ├── grok-team/                           # Separate developer coordination service
 │   └── README.md                        # Grok CLI agent guide
 ├── wheat_detection/
@@ -441,6 +546,8 @@ audio_signaling/
 │   └── requirements.txt                 # Inference/training dependencies
 ├── models/
 │   └── wheat_detection.onnx             # ONNX inference model
+├── tests/                              # Offline mission/SDK/Photon tests + opt-in live SDK smoke
+├── test/                               # Additional Chalk/vision/voice/weather/summary tests
 ├── send.py / recv.py                    # Independent ggwave utilities
 ├── requirements.txt                     # Root dependencies
 ├── .env.example                         # Environment template

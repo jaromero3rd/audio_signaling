@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import os
 import unittest
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
@@ -26,7 +27,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertNotIn("--mock", sys.argv)
 
     def test_unsafe_droid_flags_rejected_before_drone_construction(self):
-        for flags in ([], ["--mock", "--auto"]):
+        for flags in (["--mock", "--auto"], ["--allow-real-flight", "--fake-analysis"]):
             with patch.object(sys, "argv", ["demo", "--controller", "droid", "--no-photon", *flags]), \
                  patch.object(voice_mission, "load_dotenv"), \
                  patch.object(voice_mission, "MockDrone") as mock, \
@@ -38,9 +39,13 @@ class RuntimeTests(unittest.TestCase):
     def environment(self, stack):
         stack.enter_context(patch.object(sys, "argv", [
             "demo", "--controller", "droid", "--mock", "--target", "tag", "--no-photon",
-            "--fake-analysis", "--no-voice",
+            "--fake-analysis",
         ]))
         stack.enter_context(patch.object(voice_mission, "load_dotenv"))
+        stack.enter_context(patch.dict(os.environ, {"ELEVENLABS_API_KEY": "test-only-key"}))
+        voice = stack.enter_context(patch("ground_station.voice_eleven.start_voice_thread")).return_value
+        voice.ready.wait.return_value = True
+        voice.failed.is_set.return_value = False
         drone = stack.enter_context(patch.object(voice_mission, "MockDrone")).return_value
         drone.get_frame.return_value = None
         tello = stack.enter_context(patch.object(voice_mission, "TelloDrone"))
@@ -72,6 +77,17 @@ class RuntimeTests(unittest.TestCase):
             drone.close.assert_called_once()
             worker.close.assert_called_once()
             worker.start.assert_not_called()
+            tello.assert_not_called()
+
+    def test_voice_startup_failure_does_not_take_off(self):
+        with ExitStack() as stack:
+            drone, tello, worker, factory = self.environment(stack)
+            from ground_station import voice_eleven
+
+            voice_eleven.start_voice_thread.return_value.failed.is_set.return_value = True
+            self.assertEqual(voice_mission.main(), 1)
+            drone.takeoff.assert_not_called()
+            drone.close.assert_called_once()
             tello.assert_not_called()
 
     def test_unacknowledged_takeoff_still_attempts_landing(self):

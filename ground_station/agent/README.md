@@ -29,12 +29,12 @@ lets the existing survey state machine follow its normal target path.
 Use `--camera` to choose the webcam, `--droid-model` for a Factory model ID,
 and `--droid-prompt` for the initial operator instruction. `--fake-analysis`
 is an explicit simulation, never a cloud-error fallback, and is forbidden on
-real hardware. Omit it and configure `XAI_API_KEY` for actual Grok image analysis.
-`--vision-model` or `XAI_VISION_MODEL` selects the image-understanding model.
+real hardware. Omit `--fake-analysis` and pass `--crop-analysis` for a Droid
+photo score. Chalk then joins live weather and can phone the summary.
 
 `python demo.py` now defaults to Droid and a webcam mock. Omit `--no-voice`
-to start Grok Voice alongside Droid: voice starts queue intent to the same
-SDK session, not directly to the mission. Emergency abort remains immediate.
+to start ElevenLabs speech-to-text alongside Droid: transcripts queue intent
+to the same SDK session, not directly to the mission. Emergency abort remains immediate.
 With voice enabled, Droid waits for a spoken request unless a custom prompt
 requests otherwise. `--no-voice` requests one survey on startup.
 `--auto` is rejected in Droid mode. The explicit `--controller voice` path

@@ -228,11 +228,16 @@ def analysis_text(analysis: dict | None) -> str:
             name: analysis[name] for name in ("field_id", "health_score", "analysis_summary")
         })
         source = analysis["vision_source"]
-        if source not in ("grok", "fake"):
+        if source not in ("droid", "fake"):
             raise ValueError("Unknown vision source")
     except (ValueError, TypeError, KeyError):
         raise PhotonError("Invalid host analysis notification") from None
-    label = "SIMULATED, not a crop diagnosis" if source == "fake" else "Grok visual estimate, not a verified diagnosis"
+    features = analysis.get("features") if isinstance(analysis, dict) else None
+    insight = features.get("insight") if isinstance(features, dict) else None
+    if isinstance(insight, str) and insight.strip():
+        prefix = "SIMULATED. " if source == "fake" else ""
+        return f"Field {validated.field_id}: {prefix}{insight.strip()}"
+    label = "SIMULATED, not a crop diagnosis" if source == "fake" else "Droid visual estimate, not a verified diagnosis"
     return (f"Field {validated.field_id}: health score {validated.health_score:.2f}. "
             f"{label}. Findings (untrusted model observations): {validated.analysis_summary}")
 

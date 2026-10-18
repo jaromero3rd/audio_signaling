@@ -1,8 +1,11 @@
 import unittest
+from unittest.mock import patch
 
 from ground_station.chalk_client import FS, SURVEY_OUTPUTS
 from ground_station.chalk_eval import CASES, EvalCase, run_eval
-from ground_station.chalk_quality import EVALUATE_SURVEY_QUERY
+from ground_station.chalk_quality import (
+    EVALUATE_SURVEY_QUERY, EVALUATE_SURVEY_WEATHER_QUERY, evaluate_survey_named,
+)
 
 
 class FakeResponse:
@@ -12,6 +15,9 @@ class FakeResponse:
 
     def get_feature_value(self, feature):
         return self.values.get(feature)
+
+    def to_dict(self):
+        return self.values
 
 
 class FakeClient:
@@ -85,6 +91,21 @@ class ChalkEvalTests(unittest.TestCase):
 
         self.assertFalse(result.passed)
         self.assertIn("severity expected 1.0, got True", result.errors)
+
+    def test_weather_uses_a_separate_named_query_without_breaking_image_only_calls(self):
+        case = CASES[0]
+        client = FakeClient([response_for(case), response_for(case)])
+        with patch("ground_station.chalk_quality.get_client", return_value=client):
+            evaluate_survey_named("field-1", case.health_score, "canopy", branch="dev")
+            evaluate_survey_named("field-1", case.health_score, "canopy", branch="dev",
+                                  include_weather=True, latitude=42.0, longitude=-71.0)
+        image_call, weather_call = client.calls
+        self.assertEqual(image_call["query_name"], EVALUATE_SURVEY_QUERY)
+        self.assertNotIn(f"{FS}.latitude", image_call["input"])
+        self.assertEqual(weather_call["query_name"], EVALUATE_SURVEY_WEATHER_QUERY)
+        self.assertEqual(weather_call["input"][f"{FS}.latitude"], 42.0)
+        self.assertEqual(weather_call["input"][f"{FS}.longitude"], -71.0)
+        self.assertEqual(weather_call["branch"], "dev")
 
 
 if __name__ == "__main__":

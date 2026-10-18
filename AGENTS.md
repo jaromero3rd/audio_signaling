@@ -32,39 +32,27 @@ When crop analysis is enabled, `voice_mission` builds a `SurveyPipeline` and pas
 drone captures photo
   → DroidWorker.submit_photo()
       → SurveyPipeline.process_photo()
-          → analyzer.analyze()            # GrokImageAnalyzer or FakeImageAnalyzer
-              returns: health_score, analysis_summary, observations
-          → [optional --chalk] chalk_quality.evaluate_survey_named()
-              returns: health_flag, severity, recommended_action
+          → controller.assess_photo()      # Droid image attachment; or FakeImageAnalyzer
+              returns: health_score, analysis_summary
           → driver.accept_analysis()      # host validates capture_id still live
-          → controller.handle()           # Droid SDK model turn
+          → evaluate_survey(include_weather=True)
+              Chalk joins the score with live NOAA / NASA weather
+              on failure: justify_score() on the laptop
+          → store.set_last_survey() + append_decision() when CHALK_CLIENT_ID is set
+          → Photon text + photo + ElevenLabs speech if Chalk did not already deliver
+          → controller.handle()           # Droid chooses the next flight tool
               → model reads get_mission_status + get_survey_context
               → model issues issue_drone_command / send_photon_alert
 ```
 
-Analysis is logged to a local SQLite file at `data/surveys.sqlite3`.
-
-### Standalone Chalk evaluation path
-
-`chalk_eval_mission.evaluate_and_log()` (from PR #12) is a separate, simpler helper used
-when crop analysis is enabled but the full `SurveyPipeline` is not active. The `on_grok_complete`
-callback in `voice_mission` calls it after `analyze_photo_with_grok_async()` returns:
-
-```python
-chalk_eval_mission.evaluate_and_log(
-    photo_url: str,
-    health_score: float,
-    field_id: str,
-) -> {"health_flag": str, "severity": float, "action": str}
-```
-
-It calls `chalk_client.evaluate_survey()`, logs the result via `store.append_decision()`,
-and caches it via `store.set_last_survey()`.
+Analysis is also logged to a local SQLite file at `data/surveys.sqlite3`.
+The mission does not call xAI. `voice_grok.py` is not started.
 
 ### State persistence
 
-All persistent state goes to a Chalk Volume, not a local directory.
-The volume name comes from `CHALK_STATE_VOLUME` (default: `"droid-mission-state"`).
+The joined survey is written to a Chalk Volume when `CHALK_CLIENT_ID` is set.
+SQLite at `data/surveys.sqlite3` is still written either way. The volume name
+comes from `CHALK_STATE_VOLUME` (default: `"droid-mission-state"`).
 
 | Path in volume | Content |
 |---|---|
@@ -207,7 +195,8 @@ cp .env.example .env   # if present; otherwise create manually
 Required keys:
 
 ```dotenv
-XAI_API_KEY=            # xAI console → project API key (Grok vision + voice)
+ELEVENLABS_API_KEY=     # ElevenLabs speech-to-text and the spoken summary
+ELEVENLABS_VOICE_ID=    # voice used for the phone clip
 CHALK_CLIENT_ID=        # Chalk workspace → Settings > Service Tokens
 CHALK_CLIENT_SECRET=
 CHALK_ENVIRONMENT=      # development environment ID, not display name
@@ -237,7 +226,7 @@ if p.is_file():
     if l and not l.startswith('#') and '=' in l:
       k,_,v = l.partition('='); e[k]=v
 e.update(os.environ)
-for svc,keys in [('xAI',['XAI_API_KEY']),('Chalk',['CHALK_CLIENT_ID','CHALK_CLIENT_SECRET'])]:
+for svc,keys in [('ElevenLabs',['ELEVENLABS_API_KEY','ELEVENLABS_VOICE_ID']),('Chalk',['CHALK_CLIENT_ID','CHALK_CLIENT_SECRET'])]:
   print(svc, 'present' if all(e.get(k,'').strip() for k in keys) else 'MISSING')
 "
 ```
@@ -262,10 +251,10 @@ cd ..
 # Mock mode — uses webcam, no real drone, Droid high-level start/land only
 python demo.py --mock
 
-# With Grok crop-health analysis after each survey photo
+# Droid scores each survey photo; Chalk joins live weather
 python demo.py --mock --crop-analysis
 
-# Simulated crop analysis (no XAI_API_KEY needed)
+# Simulated crop analysis (no Droid image turn)
 python demo.py --mock --fake-analysis
 
 # Real Tello drone (Droid still requires local y approval for hardware actions)
@@ -282,7 +271,7 @@ Watch for:
 ```
 Droid session → local CLI (mission tools on this laptop)
 Tello stream up.
-Grok is running on this laptop.
+ElevenLabs speech-to-text is running on this laptop.
 Droid controls mission requests. y = approve pending request, space = stop, q = quit.
 ```
 

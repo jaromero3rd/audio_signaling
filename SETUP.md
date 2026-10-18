@@ -7,20 +7,18 @@ dependencies. Leave boxes unchecked until you have verified them yourself.
 Already reported: Droid installed, Cursor ready, and Chalk workspace open. An
 open dashboard does not confirm API access.
 
-## 1. xAI / Grok: image analysis and voice (P0)
+## 1. ElevenLabs: operator speech and the spoken phone summary (P0)
 
-- [ ] Sign in to [the xAI console](https://console.x.ai/), select or create the
-  team's API account, and invite teammates who need access using their own accounts.
-- [ ] Check API billing. Claim any hackathon credits first; add funds only if
-  needed and set the available spending controls. A Grok app subscription does
-  not by itself establish API billing.
-- [ ] Create a project API key and save it privately as `XAI_API_KEY`.
-- [ ] Confirm the account/key has access to an image-input model and the Grok
-  Voice API. Ask xAI or the track organizer about any access restrictions.
+The mission does not call xAI. Droid scores the survey photo. ElevenLabs only
+decodes the microphone and speaks Chalk's insight.
 
-**Ready when:** the key is saved, API credits are available, and neither required
-capability is blocked. Actual image and voice calls remain to be tested later.
-Grok Imagine (image generation) is not required.
+- [ ] Create an ElevenLabs API key and save it privately as `ELEVENLABS_API_KEY`.
+- [ ] Copy a voice id into `ELEVENLABS_VOICE_ID` for the spoken summary.
+- [ ] Confirm speech-to-text (`scribe_v1`) and text-to-speech
+  (`eleven_multilingual_v2`) are available on that key.
+
+**Ready when:** both names are saved. Live speech calls remain to be tested.
+`grok-team/` is a separate developer bot and is not part of this flight setup.
 
 ## 2. Photon 2.0: phone messaging (P0)
 
@@ -139,7 +137,7 @@ Suggested names (not an instruction to commit values):
 
 | Service | Secret values | Non-secret configuration to record |
 | --- | --- | --- |
-| xAI | `XAI_API_KEY` | Available image/voice model access |
+| ElevenLabs | `ELEVENLABS_API_KEY` | `ELEVENLABS_VOICE_ID` |
 | Photon | `PHOTON_API_KEY` | `PHOTON_PROJECT_ID`, `PHOTON_AGENT_USER_ID`, channel |
 | Factory | `FACTORY_API_KEY` only if needed | Otherwise use local Droid sign-in |
 | Chalk | `CHALK_CLIENT_ID`, `CHALK_CLIENT_SECRET` | `CHALK_ENVIRONMENT`, optional `CHALK_API_SERVER` |
@@ -172,7 +170,7 @@ if path.is_file():
             values[name.strip()] = value.strip().strip("\"'")
 values.update(os.environ)
 services = {
-    "xAI": ("XAI_API_KEY",),
+    "ElevenLabs": ("ELEVENLABS_API_KEY", "ELEVENLABS_VOICE_ID"),
     "Photon": ("PHOTON_API_KEY",),
     "Chalk": ("CHALK_CLIENT_ID", "CHALK_CLIENT_SECRET"),
 }
