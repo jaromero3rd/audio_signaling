@@ -33,7 +33,8 @@ BOARD_TCP_PORT = 9123
 
 
 class TelemetryStore:
-    def __init__(self, log_path: Path, mic_path: Path) -> None:
+    def __init__(self, log_path: Path, mic_path: Path, mic_sink=None) -> None:
+        self.mic_sink = mic_sink
         self.log_path = log_path
         self.mic_path = mic_path
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +74,11 @@ class TelemetryStore:
             self.mic_bytes += len(pcm)
             n = self.mic_chunks
             total = self.mic_bytes
+        if self.mic_sink is not None and pcm:
+            try:
+                self.mic_sink(payload)
+            except Exception:
+                pass
         # Metadata only in jsonl (not the PCM).
         meta = {
             "device_id": payload.get("device_id"),
@@ -282,9 +288,51 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="pull JSON lines from this board, e.g. 172.20.10.5:9123",
     )
+    p.add_argument(
+        "--voice",
+        action="store_true",
+        help="segment /mic audio into utterances and transcribe with ElevenLabs Scribe",
+    )
+    p.add_argument(
+        "--voice-photon",
+        action="store_true",
+        help="with --voice: also iMessage each transcript/intent to the configured user",
+    )
     args = p.parse_args(argv)
 
-    store = TelemetryStore(args.log, args.mic_file)
+    voice_service = None
+    segmenter = None
+    if args.voice or args.voice_photon:
+        from ground_station.envutil import load_dotenv
+        from ground_station.voice_ingest import MicSegmenter
+        from ground_station.voice_scribe import (
+            PhotonEchoDispatcher, PrintDispatcher, VoiceCommandService,
+        )
+
+        load_dotenv()
+        dispatcher = PrintDispatcher()
+        if args.voice_photon:
+            from ground_station.photon import PhotonClient, PhotonConfig, PhotonError
+
+            config = PhotonConfig.load()
+            if config is None:
+                print("Photon is not configured; --voice-photon needs PHOTON_* env.")
+                return 1
+            photon = PhotonClient(config)
+            try:
+                photon.check()
+            except PhotonError as error:
+                print(f"Photon route check failed: {error}")
+                return 1
+            dispatcher = PhotonEchoDispatcher(photon)
+            print("Photon echo on: every transcript/intent texts the configured user.")
+        voice_service = VoiceCommandService(dispatcher)
+        voice_service.start()
+        segmenter = MicSegmenter(voice_service.enqueue)
+        print("Voice chain on: /mic → utterances → Scribe → intent dispatch.")
+
+    store = TelemetryStore(args.log, args.mic_file,
+                           mic_sink=segmenter.feed if segmenter else None)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(store))
     post_url = f"http://127.0.0.1:{args.port}/telemetry"
     try:
@@ -341,6 +389,10 @@ def main(argv: list[str] | None = None) -> int:
         print("\nbye")
         stop.set()
         return 0
+    finally:
+        if voice_service is not None:
+            segmenter.flush()
+            voice_service.close()
     return 0
 
 
