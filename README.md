@@ -3,6 +3,49 @@
 A prototype with two independent chains: operator activation over iMessage, and
 a field data stream for photos, telemetry, and crop summaries.
 
+A phone-directed Tello survey photographs a crop stand. A persistent Factory
+Droid session scores the still. Chalk joins that score with live NOAA weather
+and NASA satellite sunlight. Photon texts the operator the insight and JPEG.
+
+## HackHarvard 2026
+
+Built for these tracks and sponsor challenges on [hhuh.io](https://hhuh.io/).
+See [README_TECHNICAL.md](README_TECHNICAL.md) for file-level mapping.
+
+**Hardware.** DJI Tello (or webcam mock) flies the survey. An Arduino UNO Q
+rides the field kit with a DHT11 (temperature °C/°F, relative humidity, heat
+index) and an LDR light sensor. The MCU posts telemetry to the laptop
+(`POST /telemetry`); a USB mic and microSD log are optional data-stream
+paths. Sensors never start a flight.
+
+**Sustainability — ASUS Save the Earth.** The point is fewer wasted scouting
+trips and more targeted follow-up. Local YOLO finds the wheat poster; Droid
+scores the canopy; Chalk checks whether NASA/NOAA light and storm support
+that score; Photon delivers the insight. The wheat-head detector was trained
+on ASUS hardware, then exported to ONNX for the host (`--target wheat`).
+ASUS content posts: public, tag @asususa / @hhuh.hackathon, hashtags
+`#ASUSEducation` `#hackharvard2026` `#agentcomputer`.
+
+**Factory Droid SDK.** Droid is the in-product mission brain: one persistent
+Python `droid_sdk.Session`, native image bytes on `--crop-analysis`, and
+exactly four tools (`get_mission_status`, `issue_drone_command`,
+`get_survey_context`, `send_photon_alert`). Host YOLO/AprilTag steers RC.
+The README_TECHNICAL section “How Droid is used at runtime” is the Factory
+protocol.
+
+**Chalk.** Query-time `FieldSurvey` features (`health_flag`, `severity`,
+`recommended_action`) plus a live NOAA/NASA justification. Named query
+`evaluate_field_survey`. Labeled evals: `python -m ground_station.chalk_eval`.
+`--chalk` fails closed.
+
+**SpaceXAI.** Built in Cursor. NASA POWER `ALLSKY_SFC_SW_DWN` satellite
+sunlight is a live Chalk input and can change the insight (reimage vs stand
+by the photo). NOAA GFS shortwave is the other irradiance source.
+
+**Photon 2.0.** The farmer’s channel: iMessage in (`start survey` / `abort` /
+`land`), insight + JPEG out, optional ElevenLabs voice note on critical
+alerts.
+
 | Concern | Provider |
 | --- | --- |
 | Operator activation (command chain) | Phone iMessage → Photon inbound → DroidVoiceGateway → Droid |
@@ -140,6 +183,11 @@ For explicitly authorized network setup:
 
 Keep the phone within board Wi-Fi range. `--dongle N` remains a fallback.
 Network setup does not authorize flight.
+
+UNO Q field sensors: DHT11 DATA on **D2**, photoresistor divider on **A0**,
+optional microSD CS on **D10**. `python -m ground_station.sensor_recv` serves
+live temperature and humidity at `/latest`. Wiring:
+[uno_q_field_station/WIRING_DHT11.md](uno_q_field_station/WIRING_DHT11.md).
 
 HackHarvard 2026 prototype. Uses the Global Wheat Head Dataset 2021 (CC BY 4.0)
 and Ultralytics YOLO (AGPL-3.0). These controls are not flight-safety certification.

@@ -14,6 +14,88 @@
 **Photon cannot place calls.** Urgent means an URGENT text plus an MP3 audio
 attachment, not a call. No telephony provider is part of this architecture.
 
+## HackHarvard prize mapping
+
+Judge index for [hhuh.io](https://hhuh.io/) tracks and sponsor challenges.
+Runtime protocol stays in the sections below.
+
+### Factory Droid SDK
+
+Droid does real work in the running product. `demo.py` →
+`ground_station.voice_mission.main()` → `DroidWorker` owns one
+`DroidController` and one long-lived `droid_sdk.Session`
+(`ground_station/agent/controller.py`). The session registers the
+`agridrone` MCP server with four tools:
+
+| Tool | File / contract |
+| --- | --- |
+| `get_mission_status()` | Host driver snapshot |
+| `issue_drone_command(drone_id, action)` | start_survey, capture_photo, continue_survey, land, abort |
+| `get_survey_context(assessment=None)` | Validated score + optional Chalk + last five SQLite rows |
+| `send_photon_alert()` | No-argument request; host owns text, recipients, JPEG |
+
+`--crop-analysis` attaches the survey JPEG as native
+`Image.from_bytes(...)` on that same session (JPEG/PNG/GIF/WebP, nonempty,
+≤ 5 MiB). Host YOLO/AprilTag in `vision.py` / `apriltag.py` owns per-frame
+steering. Droid never chooses file paths or RC sticks. Startup checks the
+tool inventory. See **How Droid is used at runtime** below.
+
+### Chalk
+
+`chalk/features.py` defines `FieldSurvey` online resolvers:
+`compute_health_flag`, `compute_severity`, `compute_recommended_action`, and
+`justify_image_with_live_weather` (30 s timeout). The last resolver calls
+`chalk/weather_live.py` `fetch_weather` / `justify` and writes `insight` plus
+`justified_action`. Named query `evaluate_field_survey` is in
+`chalk/named_queries.py`. Host path: `ground_station/chalk_quality.py` with
+`--chalk` (fail closed). Labeled agent evals: `python -m ground_station.chalk_eval`
+(`ground_station/chalk_eval.py`). Joined records go through `agent/store.py`
+when `CHALK_CLIENT_ID` is set.
+
+### SpaceXAI
+
+This repo was built in Cursor. Space data in the product is NASA POWER
+hourly `ALLSKY_SFC_SW_DWN` (satellite-derived all-sky surface shortwave,
+community `AG`) from `https://power.larc.nasa.gov/api/temporal/hourly/point`,
+implemented in `weather_live._nasa()`. NOAA NWS observations/forecast and
+Open-Meteo GFS precipitation/cloud/shortwave are fetched in the same
+`fetch_weather` call. `justify()` uses that irradiance to support or
+confound the canopy score (dark/cloud → reimage; bright-dry stress → keep
+the photo action). This is a query-time satellite product, not a radio
+downlink on the airframe. `grok-team/` is optional Grok CLI coordination
+and is not a mission provider. Runtime TTS is ElevenLabs Flash v2.5.
+
+### Hardware and field sensors
+
+| Piece | Role | Path |
+| --- | --- | --- |
+| DJI Tello / webcam mock | Aerial still + RC | `drone_interface/tello_client.py` |
+| Arduino UNO Q | Field station MCU + Linux | `uno_q_field_station/` |
+| DHT11 on **D2** | Temp °C/°F, RH %, heat index | `uno_q_field_station/WIRING_DHT11.md` |
+| LDR on **A0** | Light proxy | same |
+| microSD **D10** | Offline env log | MCU sketch |
+| Laptop `sensor_recv` | `POST /telemetry`, `GET /latest` | `ground_station/sensor_recv.py` |
+
+The UNO Q posts sensor rows; it does not activate the Tello. Operator
+start/abort stays on the Photon command chain.
+
+### Sustainability / ASUS
+
+Wheat-head YOLO was trained on ASUS hardware
+(`ground_station/train_wheat.py`, `wheat_detection/train.py` on Global Wheat
+Head Dataset 2021), exported to `models/wheat_*.onnx`, and run on the host
+with `--target wheat`. Crop-health JSON plus Chalk weather/satellite
+justification is the targeted follow-up path (alert / reimage / continue).
+ASUS content challenge is public social posts
+with `#ASUSEducation` `#hackharvard2026` `#agentcomputer`.
+
+### Photon 2.0
+
+Inbound: `photon-imessage-agent` on the drone laptop, authenticated
+`127.0.0.1:8787/command` and `/intent`. Outbound: `ground_station/photon.py`
+status text, analysis JPEG, optional ElevenLabs MP3. Same direct iMessage
+space.
+
 ## How Droid is used at runtime
 
 `demo.py` calls `ground_station.voice_mission.main()`. The default is a webcam
