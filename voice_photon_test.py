@@ -29,12 +29,9 @@ if str(ROOT) not in sys.path:
 
 from ground_station.envutil import load_dotenv
 from ground_station.photon import PhotonClient, PhotonConfig, PhotonError
+from ground_station.voice_scribe import TEXT_USER as COMMAND, transcribe
 
 RATE = 16000
-COMMAND = re.compile(
-    r"(?:text|message|tell|send)\s+(?:the\s+)?user\s*(?:saying|that|to\s+say)?\s*(.*)",
-    re.IGNORECASE | re.DOTALL,
-)
 
 
 def input_device(name: str | None) -> int | None:
@@ -81,16 +78,6 @@ def record_command(max_seconds: float, device: int | None) -> bytes:
     return out.getvalue()
 
 
-def transcribe(wav: bytes) -> str:
-    from elevenlabs.client import ElevenLabs
-
-    client = ElevenLabs(api_key=os.environ["ELEVENLABS_API_KEY"])
-    result = client.speech_to_text.convert(
-        model_id="scribe_v1", file=wav, language_code="eng")
-    text = getattr(result, "text", "") or ""
-    return text.strip()
-
-
 def send_imessage(client: PhotonClient, text: str) -> dict:
     return client.send_text(f"AgriDrone voice test: {text[:1000]}",
                             f"voicetest:{uuid.uuid4().hex}")
@@ -104,6 +91,9 @@ def main() -> int:
                         help="input device name substring (default: MacBook mic, else system)")
     args = parser.parse_args()
 
+    if not os.environ.get("ELEVENLABS_API_KEY"):
+        print("Set ELEVENLABS_API_KEY for Scribe transcription.")
+        return 1
     config = PhotonConfig.load()
     if config is None:
         print("Photon is not configured.")
@@ -113,7 +103,7 @@ def main() -> int:
         client.check()
         print("Photon route verified.")
         wav = record_command(args.max_seconds, input_device(args.device))
-        transcript = transcribe(wav)
+        transcript = transcribe(wav) if wav else ""
         if not transcript:
             print("Scribe returned an empty transcript; nothing sent.")
             return 1
@@ -132,7 +122,7 @@ def main() -> int:
             time.sleep(2)
         print("Delivery still pending; no duplicate sent.")
         return 2
-    except (PhotonError, RuntimeError) as error:
+    except (PhotonError, RuntimeError, sd.PortAudioError) as error:
         print(str(error))
         return 1
     finally:

@@ -57,13 +57,19 @@ def say_to_pcm(text: str) -> bytes:
             check=True, capture_output=True,
         )
         with wave.open(str(wav_path), "rb") as wav:
+            if wav.getnchannels() != 1 or wav.getsampwidth() != 2:
+                raise RuntimeError("say produced a non mono-s16 WAV")
             s16 = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(f"say failed: {error.stderr.decode(errors='replace')[:200]}") from None
     finally:
         wav_path.unlink(missing_ok=True)
     return (s16.astype(np.float32) / 32768.0).astype("<f4").tobytes()
 
 
 def file_to_pcm(path: Path) -> bytes:
+    if not path.is_file():
+        raise RuntimeError(f"PCM file does not exist: {path}")
     return path.read_bytes()
 
 
@@ -93,7 +99,8 @@ def main() -> int:
     src.add_argument("--mic", action="store_true", help="live Mac mic via MicTransfer")
     p.add_argument("--mic-seconds", type=float, default=8.0)
     p.add_argument("--device", default="MacBook Pro Microphone")
-    p.add_argument("--photon", action="store_true", help="iMessage each intent")
+    p.add_argument("--photon", action="store_true",
+                   help="iMessage 'text the user …' intents to the configured user")
     p.add_argument("--port", type=int, default=0, help="0 = pick a free port")
     p.add_argument("--threshold", type=float, default=0.02)
     args = p.parse_args()
@@ -113,6 +120,7 @@ def main() -> int:
         try:
             photon_client.check()
         except PhotonError as error:
+            photon_client.close()
             print(f"Photon route check failed: {error}")
             return 1
         dispatcher = PhotonEchoDispatcher(photon_client)
@@ -120,6 +128,17 @@ def main() -> int:
 
     outcomes: list[dict] = []
     service = VoiceCommandService(dispatcher, on_intent=outcomes.append)
+    inflight = [0]
+    _handle = service.handle_utterance
+
+    def counted(device_id: str, wav: bytes) -> dict:
+        inflight[0] += 1
+        try:
+            return _handle(device_id, wav)
+        finally:
+            inflight[0] -= 1
+
+    service.handle_utterance = counted
     segmenter = MicSegmenter(service.enqueue, peak_threshold=args.threshold)
     service.start()
 
@@ -146,15 +165,23 @@ def main() -> int:
                 print(f"mic transfer: sent={tx.sent} dropped={tx.dropped}")
                 segmenter.flush()
             else:
-                pcm = say_to_pcm(args.say) if args.say is not None else file_to_pcm(args.file)
+                try:
+                    pcm = say_to_pcm(args.say) if args.say is not None else file_to_pcm(args.file)
+                except RuntimeError as error:
+                    print(str(error))
+                    return 1
                 if not pcm:
                     print("empty audio source")
                     return 1
                 if post_pcm(url, pcm) == 0:
                     return 1
 
+            # Wait until every queued utterance produced an outcome or error.
             deadline = time.monotonic() + 30
-            while time.monotonic() < deadline and not outcomes and service.errors == 0:
+            while time.monotonic() < deadline and not service.errors:
+                bufs_empty = all(not d.buf for d in segmenter._devices.values())
+                if outcomes and bufs_empty and service.utterances.empty() and not inflight[0]:
+                    break
                 time.sleep(0.2)
         finally:
             server.shutdown()
@@ -166,12 +193,15 @@ def main() -> int:
     if service.errors:
         print("voice service hit errors; see messages above")
         return 1
-    if not outcomes:
-        print("No utterance produced an intent (nothing heard or empty transcript).")
-        return 1
     for outcome in outcomes:
         print(f"intent={outcome.get('intent')} transcript={outcome.get('transcript')!r} "
               f"result={outcome.get('result')}")
+    if not outcomes:
+        print("No utterance produced an intent (nothing heard or empty transcript).")
+        return 1
+    if all(outcome.get("intent") == "empty" for outcome in outcomes):
+        print("Scribe returned only empty transcripts.")
+        return 1
     return 0
 
 

@@ -24,9 +24,9 @@ mission-decision maker; voice submits *intent*, the host owns approval.
 | 1 | Mic capture on UNO Q (f32le, 48 kHz, chunk 1024, mono) | Exists | `uno_q_field_station/python/mic_capture.py` |
 | 2 | Transfer to laptop: `POST /mic`, JSON + base64 PCM, `seq` | Exists | `uno_q_field_station/python/mic_transfer.py` |
 | 3 | Laptop ingest: `/mic` → append `data/unoq_mic.f32le` + meta jsonl | Exists | `ground_station/sensor_recv.py` `ingest_mic` |
-| 4 | Seq-ordered reassembly → utterance segmentation (VAD) → WAV | **Missing** | to build: `ground_station/voice_ingest.py` |
-| 5 | ElevenLabs transcription | **Proven** via Mac mic (Scribe file mode) | `voice_photon_test.py`; agent path: `voice_eleven.py` |
-| 6 | Transcript → intent → Droid queue | Partially (regex map to build; gateway exists) | `worker.py` `DroidVoiceGateway` |
+| 4 | Seq-ordered reassembly → utterance segmentation (VAD) → WAV | **Built** | `ground_station/voice_ingest.py` (`MicSegmenter`), wired via `sensor_recv --voice` |
+| 5 | ElevenLabs transcription | **Proven** end-to-end (Scribe file mode) | `voice_scribe.py transcribe`; agent path: `voice_eleven.py` |
+| 6 | Transcript → intent → Droid queue | **Built** for intents; freeform/text need gateway methods | `voice_scribe.py map_intent`, `worker.py DroidVoiceGateway` |
 | 7 | Droid SDK session → mission tools → drone | Exists | `agent/controller.py`, `agent/driver.py` |
 
 ## Wire contract (segment 2 — already implemented, do not change)
@@ -115,7 +115,7 @@ failure has exactly one place left to be.
 | Phase | Audio source | Path exercised | Certifies | Status |
 |---|---|---|---|---|
 | 0 | MacBook mic, direct | mic → Scribe → Photon iMessage | API key, Scribe quality, intent→send path | **Done** (`voice_photon_test.py`: transcript "text the user saying the survey is done" → iMessage delivered) |
-| 1 | MacBook mic, via **loopback relay** | `mic_transfer` → `POST 127.0.0.1:8765/mic` → reassembly → VAD → resample → Scribe → intent → (mock drone / Photon echo) | Every byte-level contract the UNO Q will produce: f32le/48k/chunk-1024/base64/seq + segmentation + resample | To run |
+| 1 | MacBook mic, via **loopback relay** | `mic_transfer`/`post_mic_chunk` → `POST 127.0.0.1/mic` → reassembly → VAD → resample → Scribe → intent → (mock / Photon echo) | Every byte-level contract the UNO Q will produce: f32le/48k/chunk-1024/base64/seq + segmentation + resample | **Done** — `voice_chain_test.py` verified `text_user` and `abort` intents end-to-end |
 | 2 | Recorded fixtures through Phase 1 path | Golden utterance corpus × noise/distance variants | Transcript accuracy + latency, repeatably, without hardware | To run |
 | 3 | Real UNO Q mic over hotspot | Full chain | Only new variables: mic element, board timing, Wi-Fi loss | After teammates push |
 
@@ -135,16 +135,19 @@ while `sensor_recv` runs locally. The UNO Q Python code runs unmodified.
 - Fixtures saved as f32le 48 kHz raw (same as `data/unoq_mic.f32le`) so the
   corpus replays through the identical ingest.
 
-## Build list (the missing code)
+## Remaining work
 
-1. `ground_station/voice_ingest.py` — seq reassembly + energy VAD + resample
-   + utterance queue. Consume it from `sensor_recv`'s `/mic` ingest.
-2. `ground_station/voice_scribe.py` — utterance WAV → Scribe → intent map →
-   `DroidVoiceGateway`/`DroidWorker`. Reuse the capture/convert logic from
-   `voice_photon_test.py`; factor `record_command`/`transcribe` out of that
-   script rather than duplicating.
-3. Phase-1 test driver — `sensor_recv` + `mic_transfer` on loopback +
-   ingest + Scribe, mock drone, optional Photon echo.
+1. **Mission integration** — instantiate `VoiceCommandService` with a real
+   `DroidVoiceGateway` inside the mission process (the standalone
+   `sensor_recv --voice` path only simulates or echoes intents).
+   `DroidVoiceGateway` currently lacks `submit_instruction` and `text_user`,
+   so freeform transcripts and "text the user" intents report
+   `no_instruction_sink`/`no_text_user` until those methods are added.
+2. **Phase-2 fixture corpus** — golden utterances through
+   `voice_chain_test.py --file`/`--mic` for repeatable accuracy + latency
+   numbers.
+3. **Hardware run** — real UNO Q mic on the hotspot; tune `MicSegmenter`
+   `peak_threshold` / `--threshold` to the board's noise floor.
 
 ## Non-goals / safety invariants (unchanged)
 
