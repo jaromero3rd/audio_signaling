@@ -13,7 +13,30 @@ does not support vision. The SDK is pinned to `droid-sdk[mcp]==0.5.0`.
 Keep mission control local: remote Computers cannot reach the laptop's
 loopback MCP tools.
 
-## ElevenAgents voice command input
+## Command chain: phone → Photon → Droid
+
+Operator activation is voice on the phone, then iMessage, then Photon inbound,
+then `DroidVoiceGateway`. The data stream (photos, telemetry, crop summaries)
+is a separate chain and does not start a flight.
+
+1. Use the Photon direct space in the next section. The operator's iPhone is
+   the microphone. Dictation sends plain text; a voice memo sends audio.
+2. From `photon-imessage-agent`, run `bun run src/index.ts --check` then
+   `bun start` while `python demo.py --mock` (or `--no-voice`) is running so
+   ingest on `127.0.0.1:8766` is up. `DROID_COMMAND_URL` defaults to
+   `http://127.0.0.1:8766/operator-command`.
+3. Authorized inbound messages are command intent for the ground station.
+   Map start/status/abort onto `DroidVoiceGateway`. Queued start is never
+   takeoff. Local `y` still approves real hardware.
+4. Spacebar on the laptop remains the fast emergency stop. An iMessage abort
+   is slower than local stop.
+5. Photon cannot place calls. This is iMessage in and iMessage out.
+
+Laptop ElevenAgents below is a local fallback when the operator is at the
+ground station. `--no-voice` skips that fallback and does not disable Photon
+command ingress. Field PCM from the UNO Q is data, not activation.
+
+## Laptop ElevenAgents fallback
 
 1. In the ElevenLabs dashboard, create a private conversational agent. Select
    Scribe transcription and an ElevenLabs voice. No separate STT/TTS process
@@ -40,8 +63,10 @@ loopback MCP tools.
 
 The Python bridge registers the three client handlers locally with the
 ElevenLabs SDK. The dashboard declarations must match their names.
-`--no-voice` skips the session and asks Droid for one survey instead; it does
-not bypass real-hardware approval. Missing voice config fails before devices open.
+`--no-voice` skips the laptop ElevenAgents session. Photon iMessage dictation
+still reaches Droid on the local ingest. It does not bypass real-hardware
+approval. Missing laptop voice config fails before devices open unless
+`--no-voice` is set.
 
 ## ElevenLabs alert voice notes
 
@@ -54,18 +79,19 @@ deadline while collecting chunks. Provider limits can be stricter.
 Critical Droid-requested analysis alerts get URGENT text and an immediate
 best-effort voice note after the text attempt. Non-critical alerts are text-only
 unless the operator requests audio with `--voice-notes`.
-There is no incoming iMessage voice-request handler.
 Missing or failed TTS leaves text delivery independent and logs an unavailable
-voice note without private payloads.
+voice note without private payloads. These notes are data-chain egress, not
+the command chain.
 
 **Photon cannot place calls.** “Call the operator” means an urgent voice note,
 not telephony. No call provider, phone dialer, or call credentials are used.
 
 ## Photon direct iMessage space
 
-Configure an active Photon Beta project and iMessage assignment for one agent
-and one consenting operator. An existing **direct** space must contain exactly
-those two identities. Save:
+This space is both command ingress (phone → Photon → Droid) and data-chain
+egress (status, JPEG, voice note). Configure an active Photon Beta project
+and iMessage assignment for one agent and one consenting operator. An
+existing **direct** space must contain exactly those two identities. Save:
 
 ```dotenv
 PHOTON_API_KEY=

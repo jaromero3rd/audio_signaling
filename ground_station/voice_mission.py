@@ -351,6 +351,13 @@ def _run_mission(args, photon, cleanup) -> int:
             if photon is not None:
                 photon.notify("controller_failed")
             return 1
+        from ground_station.agent.worker import DroidVoiceGateway
+        from ground_station.operator_http import OperatorCommandServer
+
+        ingest = OperatorCommandServer(DroidVoiceGateway(droid, driver))
+        ingest.start()
+        cleanup.callback(ingest.close)
+        print("Phone dictation → Photon → this ingest → Droid. Camera loop flies after start_survey.")
     if not args.no_voice:
         from ground_station.voice_eleven import start_voice_thread
 

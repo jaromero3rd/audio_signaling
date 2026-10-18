@@ -4,11 +4,14 @@
 
 | Concern | Provider |
 | --- | --- |
+| Operator activation (command chain) | Voice on phone → iMessage → Photon inbound → DroidVoiceGateway → Droid |
 | Mission decisions and crop-health image analysis | One persistent Factory Droid SDK session, native images |
-| Operator speech and spoken replies | ElevenAgents, Scribe + ElevenLabs TTS configured in dashboard |
-| User text, image/audio attachments | Photon direct iMessage space |
+| Field data stream | Drone/camera/sensors → host → optional Droid score + Chalk weather → store |
+| Data-chain alerts | Photon outbound: text, JPEG, ElevenLabs voice note |
+| Laptop voice fallback | ElevenAgents client tools on the ground laptop |
 | Optional feature evaluation | Chalk, unchanged local thresholds otherwise |
 
+The command chain activates the drone. The data stream never starts a flight.
 Photon cannot place calls. An urgent notification is URGENT text plus a voice
 note, not telephony. No separate image-analysis provider is used.
 
@@ -16,17 +19,24 @@ note, not telephony. No separate image-analysis provider is used.
 
 `demo.py` delegates to `voice_mission.main()`. `DroidWorker` owns a
 `DroidController` and one long-lived SDK `Session` off the camera/RC thread.
-Startup queues an initial instruction. ElevenAgents starts queue intent through
-`DroidVoiceGateway`; abort bypasses model latency and stops immediately.
+Startup queues an initial instruction.
+
+Command chain: the operator speaks on the phone. Dictation arrives as iMessage
+text on the Photon direct space; a voice memo may be transcribed with
+ElevenLabs Scribe. The host maps authorized inbound messages onto
+`DroidVoiceGateway`. Abort on that gateway latches host stop immediately.
+Laptop ElevenAgents is a fallback on the same gateway. `--no-voice` skips the
+laptop session and does not disable Photon command ingress. Local `y` still
+approves real takeoff.
+
 Default mode uses local AprilTag/YOLO steering, with no cloud crop analysis.
-`--no-voice` asks Droid for one survey and does not bypass local approval.
 
 With `--crop-analysis`, the pipeline attaches the captured image in the same
 persistent session using `session.stream(..., images=[Image.from_bytes(...)])`.
 JPEG/PNG/GIF/WebP must be nonempty and ≤ 5 MiB. No tool accepts a file path.
 After the score is accepted, the host joins it with live NOAA/NASA weather in
 Chalk, stores the joined record when `CHALK_CLIENT_ID` is set, and sends the
-insight, JPEG, and an ElevenLabs clip through Photon.
+insight, JPEG, and an ElevenLabs clip through Photon outbound.
 
 Within one model turn:
 
@@ -79,8 +89,8 @@ TTS limits: 3,500 text characters, 5 MiB audio, in memory only.
 Failed/missing TTS does not block text. Photon upload uses multipart/related,
 content-hash idempotency/dedupe and bounded attachment-not-ready retry.
 Acceptance is not delivery; the queue is not durable.
-Crop summaries send the captured JPEG; incoming Photon mission commands are
-not wired.
+Crop summaries send the captured JPEG on the data chain. Operator activation
+uses the same Photon space inbound (phone → Photon → Droid).
 
 The active pipeline writes `data/surveys.sqlite3` locally. Optional
 `--chalk` uses the existing named query and fails closed on configured errors.
@@ -90,12 +100,12 @@ automatically.
 
 ## Setup and validation
 
-See `SETUP.md` for dashboard client-tool declarations, Scribe/TTS, PCM16 mono
-16 kHz, safety-prompt override and credentials:
-`ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID`, `ELEVENLABS_TTS_VOICE_ID`.
-Photon needs its existing project/assignment, agent/user handles and direct
-space. Chalk is optional. Local Droid sign-in suffices unless headless auth
-needs `FACTORY_API_KEY`. Never print or commit keys.
+See `SETUP.md` for the Photon command space (phone activation) and optional
+laptop ElevenAgents fallback (Scribe/TTS, PCM16 mono 16 kHz, client tools).
+Credentials: Photon project/assignment/handles, plus
+`ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID` (fallback), `ELEVENLABS_TTS_VOICE_ID`
+(data-chain voice notes). Chalk is optional. Local Droid sign-in suffices
+unless headless auth needs `FACTORY_API_KEY`. Never print or commit keys.
 
 ```sh
 python -m unittest discover -s tests -v

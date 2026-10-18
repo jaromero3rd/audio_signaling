@@ -1,21 +1,30 @@
-# Voice command chain spec — UNO Q mic → ElevenLabs → Droid SDK → drone
+# Field audio data chain — UNO Q mic → laptop ingest → Scribe (optional)
 
-Purpose: define the voice-command path end to end and certify the
-transcription link **before** the UNO Q microphone hardware is pushed, so
-that when field testing starts, a failure can be attributed to the mic/relay
-segment — not to ElevenLabs or intent handling.
-
-## Chain overview
+Operator **activation** is not this file. That command chain is:
 
 ```
-voice → UNO Q mic → UNO Q Linux relay → ground laptop ingest
-      → utterance segmentation → ElevenLabs Scribe → intent map
-      → DroidVoiceGateway / DroidWorker → Droid SDK tools → drone
+voice on phone → iMessage (dictation or voice memo) → Photon inbound
+    → DroidVoiceGateway → Droid → local y approval → drone
 ```
 
-Voice processing happens in exactly one place: an ElevenLabs call on the
-ground laptop. The UNO Q is a dumb PCM pipe. Droid remains the only
-mission-decision maker; voice submits *intent*, the host owns approval.
+This spec is the **separate data stream** for field PCM from the UNO Q. That
+audio does not start a flight. It is telemetry/ingest, certified so a field
+mic failure is not confused with Photon command ingress or Droid.
+
+## Command chain (activation)
+
+Phone is the microphone. Photon is the pipe. Droid queues intent. Host
+approves. See `SETUP.md` and `AGENTS.md`.
+
+## Data chain overview (this spec)
+
+```
+UNO Q mic → UNO Q Linux relay → ground laptop ingest
+      → utterance segmentation → optional ElevenLabs Scribe
+      → debug / telemetry (does not activate the drone)
+```
+
+The UNO Q is a dumb PCM pipe. Droid remains the only mission-decision maker.
 
 ## Segment status
 
@@ -151,8 +160,8 @@ while `sensor_recv` runs locally. The UNO Q Python code runs unmodified.
 
 ## Non-goals / safety invariants (unchanged)
 
-- No flight without `--allow-real-flight` + local `y` approval; voice only
-  ever queues intent.
+- No flight without `--allow-real-flight` + local `y` approval. Phone → Photon
+  is the activation command chain; this UNO Q path is data only.
 - Space/q and `driver.stop()` stay the hard stops; a transcript that says
   "resume" after stop is data, not a resume command (stopped missions do not
   resume — AGENTS.md).

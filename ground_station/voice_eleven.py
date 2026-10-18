@@ -1,4 +1,7 @@
-"""ElevenAgents command input. Voice intent never bypasses Droid or local approval."""
+"""Laptop ElevenAgents fallback. Primary activation is phone → Photon → Droid.
+
+Voice intent never bypasses Droid or local approval.
+"""
 
 from __future__ import annotations
 

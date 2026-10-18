@@ -4,12 +4,14 @@
 
 | Concern | Where it runs |
 |---------|----------------|
-| Farmer voice commands → ElevenAgents → Droid intent | **Laptop** (`ground_station/voice_eleven.py`) |
+| Farmer activation: phone voice → iMessage → Photon → Droid | **Phone + laptop host** |
 | Field sensors (DHT11, light) + SD offline log | **UNO Q MCU** |
-| Mic capture + transfer to ground computer | **UNO Q Linux** (`mic_capture` / `mic_transfer`) |
+| Mic capture + transfer (data stream, not activation) | **UNO Q Linux** (`mic_capture` / `mic_transfer`) |
 | Return-to-Wi-Fi when link is lost | **UNO Q Linux** autonomy agent |
 
-The UNO Q does **not** run ElevenAgents. It only records microphone PCM and posts it to the ground station (`POST /mic`). This relay is not wired to the command voice session.
+The UNO Q does **not** activate the drone. Field PCM is a separate data
+stream posted to the ground station (`POST /mic`). Operator commands come
+from the phone through Photon.
 
 ## Hardware (UNO Q)
 
@@ -45,8 +47,8 @@ python -m ground_station.sensor_recv --host 0.0.0.0 --port 8765
 3. Copy `python/config.example.json` → `python/config.json`. Set `wifi.ssid` (and password, or `PHONE_HOTSPOT_PASSWORD`). Leave `ground_station_url` as `"auto"` to scan `172.20.10.x:8765`.
 4. App Lab → open this folder → Run on the UNO Q.
 
-Farmer voice control (separate process on the same laptop):
+Farmer activation is phone → Photon → Droid (separate laptop process):
 
 ```bash
-python demo.py   # ElevenAgents + Droid mission (webcam mock by default)
+python demo.py   # Photon command space + Droid mission (webcam mock by default)
 ```

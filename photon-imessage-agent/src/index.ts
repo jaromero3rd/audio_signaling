@@ -2,7 +2,11 @@ import { ApiError, Photon } from "@photon-ai/api";
 import { io } from "socket.io-client";
 import { checkpoint, spaceContext } from "./checkpoint";
 import { configuration, SetupError } from "./config";
-import { record, replyFor, spaceContextFor } from "./handler";
+import {
+  audioRefFor, audioReplyFor, commandReplyFor, inboundTextFor, operatorReply,
+  record, spaceContextFor,
+} from "./handler";
+import { transcribeAudio } from "./transcribe";
 
 function report(error: unknown) {
   if (error instanceof ApiError) {
@@ -13,6 +17,82 @@ function report(error: unknown) {
     console.error(error.message);
   } else {
     console.error("Photon operation failed. Check connectivity and account permissions; no private payload logged.");
+  }
+}
+
+const dispatchedIds = new Set<string>();
+
+function voiceFail(event: unknown, config: ReturnType<typeof configuration>, message: string) {
+  return audioReplyFor(event, config, message);
+}
+
+async function voiceReply(
+  photon: Photon,
+  config: ReturnType<typeof configuration>,
+  event: unknown,
+  attachmentId: string,
+  inboundId?: string,
+) {
+  try {
+    const key = process.env.ELEVENLABS_API_KEY ?? "";
+    if (!key.trim()) {
+      return voiceFail(event, config, "Voice memo received, but transcription is not configured on the laptop.");
+    }
+    let blob: Blob | undefined;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        blob = await photon.projects.downloadAttachment({
+          path: { id: config.project, attachmentId },
+        });
+        break;
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409) {
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          continue;
+        }
+        return voiceFail(event, config, "Could not download the voice memo. Try sending text instead.");
+      }
+    }
+    if (!blob) return voiceFail(event, config, "Voice memo was not ready. Try sending text instead.");
+    let filename = "voice.m4a";
+    try {
+      const meta = await photon.projects.getAttachment({
+        path: { id: config.project, attachmentId },
+      });
+      if (typeof meta.filename === "string" && meta.filename.trim()) filename = meta.filename.trim();
+    } catch { /* filename is best-effort */ }
+    let transcript: string;
+    try {
+      transcript = await transcribeAudio(blob, filename, key);
+    } catch {
+      return voiceFail(event, config, "Could not transcribe the voice memo. Try sending text instead.");
+    }
+    const droid = await dispatchToDroid(transcript, inboundId);
+    return audioReplyFor(event, config, droid);
+  } catch {
+    return voiceFail(event, config, "Could not process the voice memo. Try sending text instead.");
+  }
+}
+
+async function dispatchToDroid(text: string, inboundId?: string): Promise<string> {
+  if (inboundId && dispatchedIds.has(inboundId)) return "Already forwarded to Droid.";
+  const url = (process.env.DROID_COMMAND_URL || "http://127.0.0.1:8766/operator-command").trim();
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!response.ok) return "Droid ingest failed on the laptop.";
+    const payload = await response.json() as { message?: unknown; ok?: unknown };
+    const reply = typeof payload.message === "string" && payload.message.trim()
+      ? operatorReply(payload.message)
+      : payload.ok === false ? "Droid rejected the request." : "Queued for Droid.";
+    if (inboundId) dispatchedIds.add(inboundId);
+    return reply;
+  } catch {
+    return "Droid is not running on the laptop. Start demo.py so Photon can reach Droid.";
   }
 }
 
@@ -71,7 +151,9 @@ async function main() {
           return;
         }
         clearTimeout(startupDeadline);
-        console.info("READY: Photon Beta iMessage subscription accepted; waiting for the configured test sender.");
+        const connectionId = typeof ack.connectionId === "string" ? ack.connectionId : "unknown";
+        const cursor = typeof ack.startSeq === "number" ? ack.startSeq : state.cursor;
+        console.info(`READY: Photon Beta iMessage subscription accepted; connection ${connectionId}; cursor ${cursor}.`);
       });
   });
   socket.on("disconnect", () => {
@@ -82,6 +164,9 @@ async function main() {
     console.error("Photon event connection failed. Check network access and project:read permission.");
   });
   socket.io.on("reconnect_failed", () => fatal("Photon event connection exhausted its reconnect attempts."));
+  socket.onAny((name: string) => {
+    if (name !== "delivery") console.info(`Photon socket event: ${name}`);
+  });
   socket.on("delivery_error", (error: unknown) => {
     const details = record(error);
     const code = typeof details.code === "string" && /^[a-z_]+$/.test(details.code) ? details.code : "unknown";
@@ -106,9 +191,19 @@ async function main() {
       if (generation !== epoch || seq <= state.cursor) return;
       const ctx = spaceContextFor(event, config);
       if (ctx) spaces.write(ctx);
-      const input = replyFor(event, config);
+      const audio = audioRefFor(event, config);
+      const spoken = inboundTextFor(event, config);
+      const inboundMessage = record(record(record(event).data).object);
+      const inboundId = audio?.messageId ?? (typeof inboundMessage.id === "string" ? inboundMessage.id : undefined);
+      const input = audio
+        ? await voiceReply(photon, config, event, audio.attachmentId, inboundId)
+        : spoken
+          ? commandReplyFor(event, config, await dispatchToDroid(spoken, inboundId))
+          : undefined;
       if (input) {
-        console.info("Inbound iMessage matched the configured sender; sending an echo reply.");
+        console.info(audio
+          ? "Inbound voice memo matched; sending host reply."
+          : "Inbound iMessage matched; forwarding the command to Droid.");
         const sent = await photon.projects.sendMessage(input);
         if (typeof sent.id !== "string" || !/^pho_msg_[0-7][0-9a-hjkmnp-tv-z]{25}$/.test(sent.id)) {
           throw new SetupError("Photon accepted the reply but returned no valid message ID. Preserve the checkpoint for idempotent recovery.");
@@ -118,6 +213,11 @@ async function main() {
       } else {
         const envelope = record(event);
         const message = record(record(envelope.data).object);
+        const content = record(message.content);
+        if (envelope.type === "message.received") {
+          const kind = typeof content.type === "string" ? content.type : "unknown";
+          console.info(`Inbound event ignored (content type: ${kind}).`);
+        }
         if (typeof message.id === "string" && outbound.has(message.id)) {
           if (envelope.type === "message.delivered") {
             console.info(`Reply delivery confirmed by Photon: ${message.id}.`);
@@ -131,10 +231,12 @@ async function main() {
       state.commit(seq);
     }).catch(error => {
       report(error);
-      if (error instanceof SetupError) fatal("Event handling stopped without advancing its saved cursor.");
+      const transcribeFail = error instanceof Error && /speech-to-text|transcript|ELEVENLABS_API_KEY|never became ready/i.test(error.message);
+      if (error instanceof SetupError && !transcribeFail) fatal("Event handling stopped without advancing its saved cursor.");
       if (error instanceof ApiError && [400, 401, 403, 409, 422].includes(error.status)) {
         fatal("Reply blocked by Photon. Fix the API permission or message error before restarting.");
       }
+      if (transcribeFail) return;
       if (generation === epoch) {
         epoch++;
         socket.io.engine.close();
