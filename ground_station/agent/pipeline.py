@@ -94,6 +94,7 @@ class SurveyPipeline:
                 "Never wait indefinitely. A queued reimage needs local approval on real hardware.",
                 {"kind": "survey_analysis", **self.latest},
             )
+        self._send_summary_if_needed()
         with self._db() as db:
             db.execute("UPDATE surveys SET decision = ? WHERE id = ?",
                        (json.dumps({"message": result["message"], "state": result["state"]}),
@@ -126,7 +127,11 @@ class SurveyPipeline:
         if not self.driver.accept_analysis(capture_id):
             return False
         if self.weather:
-            self.record_observation(analysis, features, self._active_photo_path or Path(""))
+            # The flight decision is still inside this call. Phone delivery waits
+            # until that decision returns so iMessage cannot stall the tool.
+            self.record_observation(
+                analysis, features, self._active_photo_path or Path(""), phone=False,
+            )
         receipt = f"{self.run_id}:{capture_id}"
         self.latest = {
             "receipt": receipt, "capture_id": capture_id,
@@ -137,7 +142,9 @@ class SurveyPipeline:
                        (receipt, self.field_id, time.time(), json.dumps(self.latest), "pending"))
         return True
 
-    def record_observation(self, analysis: SurveyAnalysis, features: dict, path: Path) -> None:
+    def record_observation(
+        self, analysis: SurveyAnalysis, features: dict, path: Path, *, phone: bool = True,
+    ) -> None:
         """Join live weather, store the record, and optionally send it to the phone.
 
         A deployed-query failure falls back to the same live weather functions
@@ -154,8 +161,16 @@ class SurveyPipeline:
         if features.get("insight"):
             print(features["insight"])
         self._store_volume(analysis, features, path)
-        if self.deliver and _laptop_should_deliver(features):
+        if phone and self.deliver and _laptop_should_deliver(features):
             self._deliver_phone(features, path)
+
+    def _send_summary_if_needed(self) -> None:
+        if not self.deliver or not self.latest:
+            return
+        features = self.latest.get("features")
+        if not isinstance(features, dict) or not _laptop_should_deliver(features):
+            return
+        self._deliver_phone(features, self._active_photo_path or Path(""))
 
     def _join_weather(self, analysis: SurveyAnalysis, features: dict, path: Path) -> None:
         from ground_station.chalk_client import evaluate_survey
