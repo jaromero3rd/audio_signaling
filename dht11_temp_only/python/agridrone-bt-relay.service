@@ -1,0 +1,20 @@
+[Unit]
+Description=AgriDrone UNO Q BLE sensor relay (App Lab bridge)
+After=bluetooth.service network-online.target
+Wants=bluetooth.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=arduino
+WorkingDirectory=/home/arduino
+# Wait for BlueZ adapter before first advertise attempt.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 30); do bluetoothctl show >/dev/null 2>&1 && exit 0; sleep 2; done; exit 0'
+ExecStart=/usr/bin/python3 /home/arduino/host_bt_relay.py
+Restart=always
+RestartSec=3
+Environment=HOME=/home/arduino
+Environment=PATH=/home/arduino/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target

@@ -135,7 +135,7 @@ def join_phone_hotspot(ssid: str, password: str = "") -> None:
     print(f"hotspot {snap.ssid or ssid} ip={snap.ip} connected={snap.connected}")
 
 
-def _health_ok(url: str, timeout_s: float = 0.6) -> bool:
+def _health_ok(url: str, timeout_s: float = 0.8) -> bool:
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
@@ -145,29 +145,36 @@ def _health_ok(url: str, timeout_s: float = 0.6) -> bool:
 
 
 def discover_ground_station(port: int = 8765) -> str | None:
-    """Find the Mac on the phone hotspot LAN (USB client at 172.20.10.x)."""
+    """Find sensor_recv on the phone-hotspot LAN (Apple 172.20.10.x or same /24)."""
     extra = os.environ.get("GROUND_STATION_HOST", "").strip()
     hosts: list[str] = []
     if extra:
         hosts.append(extra)
+
+    # Always try the classic Apple Personal Hotspot range first
+    hosts.extend(str(h) for h in APPLE_HOTSPOT_NET.hosts())
+
     snap = probe_wifi()
+    print(f"[wifi] board ip={snap.ip} ssid={snap.ssid} connected={snap.connected}", flush=True)
     if snap.ip:
         try:
-            addr = ipaddress.ip_address(snap.ip)
-            if addr in APPLE_HOTSPOT_NET:
-                hosts.extend(str(h) for h in APPLE_HOTSPOT_NET.hosts() if str(h) != snap.ip)
+            # Also probe .1–.20 on whatever subnet we actually joined
+            net = ipaddress.ip_network(f"{snap.ip}/24", strict=False)
+            for offset in range(1, 21):
+                hosts.append(str(net.network_address + offset))
         except ValueError:
             pass
-    if not hosts:
-        hosts.extend(str(h) for h in APPLE_HOTSPOT_NET.hosts())
+
     seen: set[str] = set()
+    if snap.ip:
+        seen.add(snap.ip)
     for host in hosts:
         if host in seen:
             continue
         seen.add(host)
         if _health_ok(f"http://{host}:{port}/health"):
             url = f"http://{host}:{port}/telemetry"
-            print(f"found ground station {url}")
+            print(f"found ground station {url}", flush=True)
             return url
     return None
 
@@ -177,13 +184,18 @@ def resolve_ground_url(cfg: dict[str, Any]) -> str:
     if env:
         return env
     url = str(cfg.get("ground_station_url") or "").strip()
-    if url and url.lower() != "auto":
+    # Reject known-bad / placeholder addresses that always time out
+    bad = ("192.0.0.2", "0.0.0.0", "127.0.0.1", "localhost", "OTHER_COMPUTER")
+    if url and url.lower() != "auto" and not any(b in url for b in bad):
         return url
+    if url and any(b in url for b in bad):
+        print(f"[wifi] ignoring bad ground_station_url={url!r}; using auto-discover", flush=True)
     found = discover_ground_station()
     if not found:
         raise RuntimeError(
-            "No ground station on 172.20.10.0/28:8765. On the Mac run "
-            "python -m ground_station.sensor_recv and "
-            "python -m drone_interface.field_links --check"
+            "No ground station on hotspot LAN :8765. On the ground PC "
+            "(same hotspot) run: python -m ground_station.sensor_recv "
+            "--host 0.0.0.0 --port 8765  then set ground_station_url to "
+            "http://THAT_PC_IP:8765/telemetry"
         )
     return found

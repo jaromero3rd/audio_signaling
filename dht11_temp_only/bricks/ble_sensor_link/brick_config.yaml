@@ -1,0 +1,8 @@
+id: ble_sensor_link
+name: BLE Sensor Link
+description: >-
+  Relays sensor JSON to a BLE peripheral (AgriDrone-UNOQ) using BlueZ on the
+  UNO Q Linux host. Follows Arduino Custom Brick pattern: Docker service with
+  host D-Bus, App Python talks over TCP.
+category: networking
+variables: []

@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 
 SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -152,55 +153,132 @@ def _pick_device(found: dict):
     return None
 
 
-async def run_ble(log_path: Path | None, timeout: float) -> int:
+async def run_ble(
+    log_path: Path | None,
+    timeout: float,
+    preferred_address: str | None = None,
+) -> int:
     try:
-        from bleak import BleakClient
+        from bleak import BleakClient, BleakScanner
     except ImportError:
         print("Install bleak: pip install bleak", file=sys.stderr)
         return 1
 
-    found = await _discover(timeout)
-    device = _pick_device(found) if found else None
-
-    if device is None:
-        print(
-            f"Could not find {DEVICE_NAME}.\n"
-            "Checklist:\n"
-            "  1) App Lab app is Running on the UNO Q\n"
-            "  2) Monitor shows: [bt-ble] advertising as AgriDrone-UNOQ\n"
-            "  3) Bluetooth is ON on this laptop\n"
-            "  4) Stay within a few meters\n"
-            "  5) Debug: python -m ground_station.bt_sensor_recv --scan\n"
-            "Or pair the board in Windows Bluetooth settings and use:\n"
-            "  python -m ground_station.bt_sensor_recv --com COMx",
-            file=sys.stderr,
-        )
-        if found:
-            print("\nNearby BLE names (for debugging):", file=sys.stderr)
-            for addr, (dev, adv) in list(found.items())[:20]:
-                name = dev.name or adv.local_name or "(no name)"
-                print(f"  {addr}  {name}", file=sys.stderr)
-        return 2
-
-    print(f"Connecting to {device.address} ({device.name})...")
+    # Last known board MAC from earlier successful sessions on this laptop.
+    target_addr = (preferred_address or "").strip() or "14:B5:CD:E4:29:79"
+    print(f"Ground station BLE — looking for {DEVICE_NAME} (hint {target_addr})")
+    print(
+        "Remove AgriDrone-UNOQ from Windows Bluetooth if it shows as headphones. "
+        "Do not pair.",
+        flush=True,
+    )
     buf = bytearray()
+    last_data = time.monotonic()
 
     def on_notify(_handle: int, data: bytearray) -> None:
-        nonlocal buf
+        nonlocal buf, last_data
+        last_data = time.monotonic()
         buf.extend(data)
         while b"\n" in buf:
             line, _, buf = buf.partition(b"\n")
             _handle_line(line.decode("utf-8", errors="replace"), log_path)
 
-    async with BleakClient(device) as client:
-        print("Connected — streaming (Ctrl+C to stop)", flush=True)
-        await client.start_notify(TX_CHAR_UUID, on_notify)
+    attempt = 0
+    while True:
+        attempt += 1
+        disconnected = asyncio.Event()
+
+        def _on_disconnect(_client: object) -> None:
+            disconnected.set()
+
         try:
-            while True:
-                await asyncio.sleep(1)
-        finally:
-            await client.stop_notify(TX_CHAR_UUID)
-    return 0
+            print(f"Scanning/connecting (attempt {attempt})...", flush=True)
+            # After a board power-cycle, connect by known MAC first (fast).
+            # Fall back to a scan if the address is not visible yet.
+            live = None
+            if target_addr:
+                print(f"Trying known address {target_addr}…", flush=True)
+                live = await BleakScanner.find_device_by_address(
+                    target_addr, timeout=max(6.0, min(timeout, 12.0))
+                )
+            if live is None:
+                found = await _discover(timeout)
+                live = _pick_device(found) if found else None
+            if live is None and target_addr:
+                live = await BleakScanner.find_device_by_address(
+                    target_addr, timeout=max(8.0, timeout / 2)
+                )
+            if live is None:
+                raise RuntimeError(
+                    f"{DEVICE_NAME} not advertising right now — after a disconnect "
+                    "the board must re-advertise (host_bt_relay). Keep nearby; "
+                    "dismiss Windows pair popups; App Lab Running"
+                )
+            target_addr = live.address
+            print(f"Found {live.address} ({live.name or DEVICE_NAME})", flush=True)
+            async with BleakClient(
+                live,
+                timeout=45.0,
+                disconnected_callback=_on_disconnect,
+            ) as client:
+                # Cold-boot: GATT may appear before Nordic UART is registered.
+                # Windows classic audio bonding also hides TX — fail fast and
+                # reconnect (board relay strips those pairs automatically).
+                tx_ok = False
+                for gatt_try in range(1, 4):
+                    await asyncio.sleep(0.6 if gatt_try == 1 else 1.0)
+                    try:
+                        services = await client.get_services()
+                    except Exception:  # noqa: BLE001
+                        services = client.services
+                    tx_ok = any(
+                        str(char.uuid).lower() == TX_CHAR_UUID.lower()
+                        for svc in services
+                        for char in svc.characteristics
+                    )
+                    if tx_ok:
+                        break
+                    print(
+                        f"GATT not ready yet (try {gatt_try}/3) — waiting for TX char…",
+                        flush=True,
+                    )
+                if not tx_ok:
+                    try:
+                        await client.disconnect()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    raise RuntimeError(
+                        "TX characteristic missing (often Windows classic/audio pair). "
+                        "Dismiss any Bluetooth pair popup; remove AgriDrone-UNOQ / "
+                        "Headphones for that device in Settings if present. Do not pair."
+                    )
+                print("Connected — streaming (Ctrl+C to stop)", flush=True)
+                await client.start_notify(TX_CHAR_UUID, on_notify)
+                last_data = time.monotonic()
+                try:
+                    while not disconnected.is_set():
+                        if time.monotonic() - last_data > 15.0:
+                            print(
+                                "[warn] no samples for 15s — is App Lab still Running?",
+                                flush=True,
+                            )
+                            last_data = time.monotonic()
+                        try:
+                            await asyncio.wait_for(disconnected.wait(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            pass
+                finally:
+                    try:
+                        await client.stop_notify(TX_CHAR_UUID)
+                    except Exception:  # noqa: BLE001
+                        pass
+            print("BLE disconnected — reconnecting in 2s...", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).strip() or repr(exc)
+            print(f"BLE error: {msg} — retrying in 3s...", flush=True)
+            await asyncio.sleep(3.0)
+            continue
+        await asyncio.sleep(2.0)
 
 
 def _pick_usb_serial() -> str:
@@ -243,8 +321,9 @@ def run_com(port: str, log_path: Path | None, baud: int) -> int:
 
 
 def run_tcp(target: str, log_path: Path | None) -> int:
-    """Connect to App Lab TCP stream, e.g. 192.168.1.50:9123"""
+    """Connect to relay/App Lab TCP stream; auto-reconnects on drop."""
     import socket
+    import time as _time
 
     if ":" in target:
         host, _, port_s = target.rpartition(":")
@@ -252,23 +331,32 @@ def run_tcp(target: str, log_path: Path | None) -> int:
     else:
         host, port = target, 9123
 
-    print(f"Connecting TCP to {host}:{port} ...")
-    with socket.create_connection((host, port), timeout=10) as sock:
-        print("Connected — streaming (Ctrl+C to stop)", flush=True)
-        sock.settimeout(1.0)
-        buf = ""
-        while True:
-            try:
-                chunk = sock.recv(4096)
-            except socket.timeout:
-                continue
-            if not chunk:
-                print("Connection closed", flush=True)
-                return 0
-            buf += chunk.decode("utf-8", errors="replace")
-            while "\n" in buf:
-                line, _, buf = buf.partition("\n")
-                _handle_line(line, log_path)
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            print(f"Connecting TCP to {host}:{port} (attempt {attempt})...", flush=True)
+            with socket.create_connection((host, port), timeout=10) as sock:
+                print("Connected — streaming (Ctrl+C to stop)", flush=True)
+                sock.settimeout(1.0)
+                buf = ""
+                while True:
+                    try:
+                        chunk = sock.recv(4096)
+                    except socket.timeout:
+                        continue
+                    if not chunk:
+                        print("Connection closed — reconnecting in 2s...", flush=True)
+                        break
+                    buf += chunk.decode("utf-8", errors="replace")
+                    while "\n" in buf:
+                        line, _, buf = buf.partition("\n")
+                        _handle_line(line, log_path)
+        except OSError as exc:
+            print(f"TCP error: {exc} — retrying in 3s...", flush=True)
+            _time.sleep(3.0)
+            continue
+        _time.sleep(2.0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -290,6 +378,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Only list nearby BLE devices (helps when the PC cannot see the UNO Q)",
     )
+    p.add_argument(
+        "--address",
+        default=None,
+        help="Preferred BLE MAC, e.g. 14:B5:CD:E4:29:79",
+    )
     args = p.parse_args(argv)
     log_path = None if args.no_log else (args.log or Path("data/unoq_bt.jsonl"))
 
@@ -305,7 +398,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Using {port}")
             baud = args.baud if args.baud != 9600 else 115200
             return run_com(port, log_path, baud)
-        return asyncio.run(run_ble(log_path, args.timeout))
+        return asyncio.run(run_ble(log_path, args.timeout, args.address))
     except KeyboardInterrupt:
         print("\nbye")
         return 0

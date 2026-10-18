@@ -1,0 +1,11 @@
+{
+  "ground_station_url": "auto",
+  "device_id": "unoq-dht11",
+  "http_min_interval_s": 0.5,
+  "wifi": {
+    "ssid": "YOUR_PHONE_HOTSPOT_NAME",
+    "password": "YOUR_HOTSPOT_PASSWORD",
+    "join": true,
+    "note": "UNO Q joins this Personal Hotspot, then POSTs DHT11/light to the ground PC. Use auto to find sensor_recv on 172.20.10.0/28, or set http://IP:8765/telemetry."
+  }
+}

@@ -1,0 +1,16 @@
+[Unit]
+Description=AgriDrone UNO Q BLE sensor relay (user)
+After=bluetooth.target default.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/bash /home/arduino/ensure_bt.sh
+ExecStart=/bin/bash /home/arduino/start_bt_relay.sh
+Restart=always
+RestartSec=5
+Environment=HOME=/home/arduino
+WorkingDirectory=/home/arduino
+
+[Install]
+WantedBy=default.target

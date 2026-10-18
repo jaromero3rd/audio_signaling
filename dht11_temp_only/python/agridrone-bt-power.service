@@ -1,0 +1,12 @@
+[Unit]
+Description=Power on Bluetooth adapter at boot (AgriDrone)
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'rfkill unblock bluetooth 2>/dev/null; rfkill unblock all 2>/dev/null; for i in 1 2 3 4 5 6 7 8 9 10; do bluetoothctl power on && bluetoothctl show | grep -q "Powered: yes" && exit 0; sleep 2; done; exit 0'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

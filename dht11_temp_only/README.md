@@ -1,90 +1,72 @@
-# UNO Q sensors → laptop
+# DHT11 + LDR → Bluetooth (wireless) → laptop
 
-## The one important fact
-
-**App Lab cannot do Bluetooth.** Arduino’s App container has no BlueZ/D-Bus.
-That is why you saw `BLE-DOWN` / Errno 2. Sensors still work — use TCP, or run
-Bluetooth on the Debian **host**.
+App Lab **cannot** talk to BlueZ. The board host runs a small BLE bridge:
 
 ```
-MCU --Bridge--> App Lab container --:9124--> Debian host_tcp_relay --:9123--> Mac
+MCU sensors → App Lab → TCP :9124 → host_bt_relay.py → BLE AgriDrone-UNOQ → laptop
 ```
 
-App Lab cannot POST to the Mac on iPhone hotspot, and cannot expose :9123 on
-the board Wi-Fi IP. The host relay is required.
+After a **one-time USB setup**, the board can run on **battery** and the laptop
+receives over Bluetooth with **no wire**.
 
 ---
 
-## Path A — Host TCP relay (use this)
+## One-time board setup (USB to this PC once)
 
-1. Board USB to the Mac (ADB). Phone hotspot can stay as the board's Wi-Fi.
+From PowerShell in the repo:
 
-```bash
-adb devices
-adb push dht11_temp_only/python/host_tcp_relay.py /tmp/host_tcp_relay.py
-adb shell python3 /tmp/host_tcp_relay.py
+```powershell
+$adb = "$env:LOCALAPPDATA\AppLab\a15\data\packages\arduino\tools\adb\32.0.0\adb.exe"
+& $adb devices
+& $adb push dht11_temp_only\python\host_bt_relay.py /home/arduino/host_bt_relay.py
+& $adb push dht11_temp_only\python\start_bt_relay.sh /home/arduino/start_bt_relay.sh
+& $adb push dht11_temp_only\python\agridrone-bt-relay.service /home/arduino/agridrone-bt-relay.service
+& $adb push dht11_temp_only\python\install_bt_relay.sh /home/arduino/install_bt_relay.sh
+& $adb shell "sed -i 's/\r$//' /home/arduino/*.sh; chmod +x /home/arduino/install_bt_relay.sh /home/arduino/start_bt_relay.sh; bash /home/arduino/install_bt_relay.sh"
 ```
 
-Leave that shell open. You want `App Lab on 0.0.0.0:9124` and `Mac pull on 0.0.0.0:9123`.
+You want the relay advertising: `BLE advertising as AgriDrone-UNOQ`
 
-2. App Lab → **Run** the DHT11 app. Monitor should show `HOST-172.17.0.1:9124` (not only POST failed).
+After install, a **board power-cycle** restarts the relay and it **re-advertises**
+automatically. The laptop must keep `bt_sensor_recv` running (it reconnects).
+Do **not** Windows-pair AgriDrone-UNOQ — BLE GATT reconnect is enough.
 
-3. Mac:
+## Every session (wireless)
 
-```bash
-python3 -m ground_station.sensor_recv
+1. Power the UNO Q (battery or USB power — USB to the **laptop is not required**).
+2. App Lab → import `dht11_temp_only_import.zip` → **Run**  
+   Monitor: `BLE-BRIDGE(...:9124)` then `SENT`
+3. On the laptop (Bluetooth ON — **do not** pair AgriDrone-UNOQ in Windows Settings):
+
+```powershell
+cd C:\Users\maxim\audio_signaling
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m ground_station.bt_sensor_recv
 ```
 
-It scans `172.20.10.x:9123`. If needed, use the board hotspot IP from the App Lab/host:
+Leave that laptop command running across board power-cycles — it will reconnect
+when AgriDrone-UNOQ advertises again.
 
-```bash
-python3 -m ground_station.sensor_recv --tcp 172.20.10.5:9123
-```
+Dismiss Windows “Add a device” popups. **Do not pair** AgriDrone-UNOQ in Settings
+(Windows often treats it as headphones and then GATT fails). Remove it if listed.
+
+Success looks like: `T=22.3C  RH=40%  light=…`
+
+If BLE connect fails on Windows (`Unreachable` / no GATT), remove the device in
+Bluetooth settings, toggle Bluetooth off/on, and run `.\recv_unoq_ble.ps1` again.
+USB debug (below) still works while you sort that out.
 
 ---
 
-## Path B — Real Bluetooth (host relay)
+## Optional USB debug (when BLE is flaky)
 
-### 1) PC: open a shell on the board
-Follow Arduino: https://docs.arduino.cc/tutorials/uno-q/adb/
-
-```bash
-adb devices
-adb shell
+```powershell
+$adb = "$env:LOCALAPPDATA\AppLab\a15\data\packages\arduino\tools\adb\32.0.0\adb.exe"
+& $adb forward tcp:9125 tcp:9125
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m ground_station.bt_sensor_recv --tcp 127.0.0.1:9125
 ```
 
-### 2) Board shell: start Bluetooth relay
-Copy `python/host_bt_relay.py` onto the board (or clone the repo), then:
+## Wi‑Fi fallback
 
-```bash
-pip3 install --user bless
-python3 host_bt_relay.py
+```powershell
+python -m ground_station.bt_sensor_recv --tcp <BOARD-IP>:9123
 ```
-
-You want:
-```
-[host] BLE advertising as AgriDrone-UNOQ
-[host] waiting for App Lab on TCP :9124
-```
-
-Leave this terminal open.
-
-### 3) App Lab: Run the sensor app
-Monitor should change to:
-```
-BLE-via-host(172.17.0.1:9124)
-```
-
-### 4) Laptop:
-```bash
-pip install bleak
-python -m ground_station.bt_sensor_recv
-```
-
----
-
-## Wiring
-| Sensor | Pins |
-|--------|------|
-| DHT11 | S→D2, U→5V, G→GND |
-| LDR | 5V—LDR—A0—100k—GND |

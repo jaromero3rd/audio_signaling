@@ -3,8 +3,8 @@
   "device_id": "unoq-field-01",
   "sample_relay_timeout_s": 2.0,
   "wifi": {
-    "ssid": "iPhone",
-    "password": "",
+    "ssid": "Nicholas's iPhone",
+    "password": "1Alexander",
     "join": true,
     "note": "Join the phone Personal Hotspot (Wi-Fi). Mac is on the same LAN via USB (172.20.10.0/28). Password can also be PHONE_HOTSPOT_PASSWORD.",
     "min_rssi_dbm": -75,

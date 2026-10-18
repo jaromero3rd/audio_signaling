@@ -1,0 +1,114 @@
+# Arduino Custom Brick Docker service.
+# Docs: https://docs.arduino.cc/software/app-lab/ (Custom Bricks)
+# BLE needs the host BlueZ stack via the system D-Bus socket.
+services:
+  ble_relay:
+    image: python:3.13-slim-bookworm
+    container_name: agri_ble_relay
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /run/dbus:/run/dbus
+      - /var/run/dbus:/var/run/dbus
+    # Install bless and run the GATT relay (same logic as python/host_bt_relay.py)
+    command:
+      - bash
+      - -lc
+      - |
+        set -e
+        pip install -q --no-cache-dir 'bless>=0.2.6' || pip install -q --no-cache-dir bless
+        python - <<'PY'
+        import asyncio, socket, threading
+        from typing import Any
+
+        SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+        TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+        RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+        DEVICE_NAME = "AgriDrone-UNOQ"
+        LISTEN_PORT = 9124
+
+        class Relay:
+            def __init__(self):
+                self.server = None
+                self.loop = None
+                self.lock = threading.Lock()
+                self.latest = b"{}\n"
+            def push(self, line: bytes):
+                if not line.endswith(b"\n"):
+                    line += b"\n"
+                with self.lock:
+                    self.latest = line
+                if self.server is None or self.loop is None:
+                    return
+                async def _notify():
+                    char = self.server.get_characteristic(TX_CHAR_UUID)
+                    char.value = bytearray(line)
+                    self.server.update_value(SERVICE_UUID, TX_CHAR_UUID)
+                try:
+                    asyncio.run_coroutine_threadsafe(_notify(), self.loop)
+                except Exception as exc:
+                    print(f"[ble_relay] notify failed: {exc}", flush=True)
+
+        def tcp_server(relay: Relay):
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(("0.0.0.0", LISTEN_PORT))
+            srv.listen(4)
+            print(f"[ble_relay] TCP {LISTEN_PORT} + BLE {DEVICE_NAME}", flush=True)
+            while True:
+                client, addr = srv.accept()
+                print(f"[ble_relay] app connected {addr}", flush=True)
+                threading.Thread(target=client_reader, args=(client, relay), daemon=True).start()
+
+        def client_reader(client, relay: Relay):
+            buf = b""
+            try:
+                while True:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, _, buf = buf.partition(b"\n")
+                        if line:
+                            relay.push(line + b"\n")
+            except OSError:
+                pass
+            finally:
+                try:
+                    client.close()
+                except OSError:
+                    pass
+
+        async def ble_main(relay: Relay):
+            from bless import BlessServer, GATTAttributePermissions, GATTCharacteristicProperties
+            def perm(*names):
+                for n in names:
+                    if hasattr(GATTAttributePermissions, n):
+                        return getattr(GATTAttributePermissions, n)
+                return 0
+            loop = asyncio.get_running_loop()
+            relay.loop = loop
+            server = BlessServer(name=DEVICE_NAME, loop=loop)
+            relay.server = server
+            tx = GATTCharacteristicProperties.read | GATTCharacteristicProperties.notify
+            rx = GATTCharacteristicProperties.write | GATTCharacteristicProperties.write_without_response
+            await server.add_new_service(SERVICE_UUID)
+            await server.add_new_characteristic(SERVICE_UUID, TX_CHAR_UUID, tx, None, perm("readable", "read"))
+            await server.add_new_characteristic(SERVICE_UUID, RX_CHAR_UUID, rx, None, perm("writeable", "writable", "write") or perm("readable", "read"))
+            await server.start()
+            print(f"[ble_relay] advertising {DEVICE_NAME}", flush=True)
+            while True:
+                await asyncio.sleep(3600)
+
+        relay = Relay()
+        threading.Thread(target=tcp_server, args=(relay,), daemon=True).start()
+        asyncio.run(ble_main(relay))
+        PY
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

@@ -1,180 +1,145 @@
-"""Sensor outbound links from the App Lab Python container.
+"""Sensor stream: App Lab → host Bluetooth bridge → laptop.
 
-App Lab cannot publish :9123 on the board Wi-Fi address. Samples go to
-host_tcp_relay.py on the Debian host (TCP :9124). The Mac pulls host :9123.
+App Lab cannot use BlueZ. Bridge pattern (Arduino-compatible):
+  MCU --Bridge--> App Python --TCP:9124--> host_bt_relay.py (Debian) --BLE--> laptop
+
+Also keeps TCP:9123 so a ground PC can pull with --tcp if needed.
 """
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import socket
 import threading
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-APPLE_HOTSPOT_NET = ipaddress.ip_network("172.20.10.0/28")
-
 DEVICE_NAME = "AgriDrone-UNOQ"
-TCP_PORT = 9123
-HOST_RELAY_PORT = 9124
-HOST_RELAY_CANDIDATES = (
-    "127.0.0.1",
+TCP_PORT = 9123          # laptop may pull from board
+HOST_RELAY_PORT = 9124   # App Lab → host_bt_relay.py
+_CONFIG_PATH = Path(__file__).with_name("config.json")
+
+_HOST_CANDIDATES = (
     "172.17.0.1",
     "172.18.0.1",
     "172.10.0.1",
+    "192.168.0.1",
+    "127.0.0.1",
 )
-_CONFIG_PATH = Path(__file__).with_name("config.json")
-
-
-def _health_ok(url: str, timeout_s: float = 0.6) -> bool:
-    req = urllib.request.Request(url, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            return 200 <= getattr(resp, "status", 200) < 300
-    except (urllib.error.URLError, TimeoutError, OSError):
-        return False
-
-
-def discover_ground_station(port: int = 8765) -> str | None:
-    """Find the Mac on iPhone USB/Wi-Fi hotspot LAN (172.20.10.0/28)."""
-    for host in APPLE_HOTSPOT_NET.hosts():
-        if _health_ok(f"http://{host}:{port}/health"):
-            url = f"http://{host}:{port}/telemetry"
-            print(f"[cfg] auto ground_station_url={url}", flush=True)
-            return url
-    print("[cfg] auto-discover failed; set ground_station_url to the Mac USB IP", flush=True)
-    return None
 
 
 def load_config() -> dict[str, Any]:
     try:
         return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        print(f"[cfg] could not read config.json: {exc}", flush=True)
+        print(f"[cfg] {exc}", flush=True)
         return {}
 
 
-def _docker_gateway() -> str | None:
+def is_bad_ground_url(url: str) -> bool:
+    u = (url or "").strip()
+    if not u or u.lower() == "auto":
+        return True
+    bad = ("192.0.0.2", "0.0.0.0", "127.0.0.1", "localhost", "OTHER_COMPUTER", "REPLACE_WITH")
+    return any(b.lower() in u.lower() for b in bad)
+
+
+def _default_gateway() -> str | None:
     try:
-        for line in Path("/proc/net/route").read_text().splitlines()[1:]:
-            parts = line.split()
-            if len(parts) >= 3 and parts[1] == "00000000":
-                raw = int(parts[2], 16)
-                return socket.inet_ntoa(raw.to_bytes(4, "little"))
+        with open("/proc/net/route", encoding="utf-8") as f:
+            next(f)
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] == "00000000":
+                    raw = int(parts[2], 16)
+                    return socket.inet_ntoa(raw.to_bytes(4, "little"))
     except OSError:
         return None
     return None
 
 
-def _local_ips() -> list[str]:
-    ips: list[str] = []
-    try:
-        hostname = socket.gethostname()
-        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = info[4][0]
-            if ip and not ip.startswith("127.") and ip not in ips:
-                ips.append(ip)
-    except OSError:
-        pass
-    # Also try UDP trick for the default outbound interface
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        if ip and not ip.startswith("127.") and ip not in ips:
-            ips.insert(0, ip)
-    except OSError:
-        pass
-    return ips
-
-
 class SensorStream:
-    """TCP + HTTP POST to ground_station.sensor_recv + optional host BLE relay."""
+    def __init__(self, ground_url_override: str | None = None) -> None:
+        cfg = load_config()
+        self.device_id = str(cfg.get("device_id") or "unoq-dht11")
+        self.board_ip: str | None = None
+        self.sent = 0
 
-    def __init__(self) -> None:
         self._tcp_clients: list[socket.socket] = []
         self._tcp_lock = threading.Lock()
-        self._tcp_ok = False
-        self._tcp_error: str | None = None
 
         self._host_sock: socket.socket | None = None
         self._host_addr: str | None = None
         self._host_lock = threading.Lock()
 
-        cfg = load_config()
-        url = str(cfg.get("ground_station_url") or "").strip()
-        # "auto" scans the Mac and times out on iPhone hotspot. Host relay instead.
-        self.ground_url = "" if (not url or url.lower() == "auto") else url
-        self.device_id = str(cfg.get("device_id") or "unoq-dht11")
-        self._http_ok = False
-        self._http_error: str | None = None
-        self._last_http_post = 0.0
-        self._last_http_err_print = 0.0
-        # Sensors only — no microphone. Post ~2 Hz so ground station stays readable.
-        self._http_min_interval_s = float(cfg.get("http_min_interval_s") or 0.5)
-        self._http_timeout_s = float(cfg.get("http_timeout_s") or 1.0)
-
-        self.sent = 0
-        self.ips = _local_ips()
+        self._latest: dict[str, Any] | None = None
+        self._lock = threading.Lock()
 
     def start(self) -> None:
-        threading.Thread(target=self._host_client, name="host-9124", daemon=True).start()
+        self.board_ip = self._guess_ip()
         threading.Thread(target=self._tcp_server, name="tcp-9123", daemon=True).start()
+        threading.Thread(target=self._host_bridge_loop, name="bt-bridge", daemon=True).start()
         time.sleep(0.3)
-        self._print_howto()
+        print("=" * 56, flush=True)
+        print("BLUETOOTH BRIDGE (wireless OK on battery)", flush=True)
+        print("  Board: host_bt_relay.py must be running (install_bt_relay.sh once)", flush=True)
+        print(f"  Laptop (no USB): python -m ground_station.bt_sensor_recv", flush=True)
+        print(f"  Look for BLE name {DEVICE_NAME} — do NOT pair in Windows Settings", flush=True)
+        print("Fallback Wi‑Fi pull:", flush=True)
+        print(f"  python -m ground_station.bt_sensor_recv --tcp {self.board_ip or 'BOARD_IP'}:{TCP_PORT}", flush=True)
+        print("=" * 56, flush=True)
 
-    def _print_howto(self) -> None:
-        print("=" * 56, flush=True)
-        print("Need host_tcp_relay.py on Debian (adb shell), then Mac sensor_recv.", flush=True)
-        print(f"  Looking for host relay at *: {HOST_RELAY_PORT}", flush=True)
-        print(f"  Container TCP:{TCP_PORT} (not visible on Wi-Fi without the relay)", flush=True)
-        print("=" * 56, flush=True)
+    @staticmethod
+    def _guess_ip() -> str | None:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if ip and not ip.startswith("127."):
+                return ip
+        except OSError:
+            pass
+        return None
 
     def status_line(self) -> str:
-        if self.ground_url:
-            http = "HTTP-OK" if self._http_ok else f"HTTP-WAIT({self._http_error or self.ground_url})"
-        else:
-            http = "HTTP-off"
+        with self._host_lock:
+            ble = f"BLE-BRIDGE({self._host_addr})" if self._host_addr else "BLE-BRIDGE waiting (start host_bt_relay.py)"
         with self._tcp_lock:
             n = len(self._tcp_clients)
-        tcp = f"TCP:{TCP_PORT} clients={n}" if self._tcp_ok else f"TCP-DOWN({self._tcp_error})"
-        host = f"HOST-{self._host_addr}" if self._host_addr else "HOST-WAIT"
-        return f"{http} | {tcp} | {host}"
+        tcp = f"TCP:{TCP_PORT} clients={n}"
+        return f"{ble} | {tcp}"
 
-    def _tcp_server(self) -> None:
-        try:
-            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind(("0.0.0.0", TCP_PORT))
-            srv.listen(4)
-            self._tcp_ok = True
-            print(f"[tcp] listening on 0.0.0.0:{TCP_PORT}", flush=True)
-            while True:
-                client, addr = srv.accept()
-                print(f"[tcp] laptop connected: {addr}", flush=True)
-                with self._tcp_lock:
-                    self._tcp_clients.append(client)
-        except Exception as exc:  # noqa: BLE001
-            self._tcp_error = str(exc)
-            print(f"[tcp] failed: {exc}", flush=True)
+    def send_sample(self, payload: dict[str, Any]) -> bool:
+        payload = dict(payload)
+        payload.pop("audio_b64", None)
+        payload.pop("mic", None)
+        payload.setdefault("source", "dht11")
+        payload.setdefault("device_id", self.device_id)
+        with self._lock:
+            self._latest = payload
+        line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+        ok = False
+        ok = self._send_host(line) or ok
+        ok = self._fanout_tcp(line) or ok
+        if ok:
+            self.sent += 1
+        return ok
 
-    def _host_client(self) -> None:
-        """Push JSON to host_tcp_relay.py on the Debian host (TCP :9124)."""
+    def _host_bridge_loop(self) -> None:
+        """Keep a TCP link to host_bt_relay.py on the Debian side."""
         while True:
             with self._host_lock:
-                alive = self._host_sock is not None
-            if alive:
-                time.sleep(3)
+                up = self._host_sock is not None
+            if up:
+                time.sleep(2)
                 continue
-            gw = _docker_gateway()
-            hosts = list(HOST_RELAY_CANDIDATES)
-            if gw and gw not in hosts:
-                hosts.insert(0, gw)
+            hosts: list[str] = []
+            gw = _default_gateway()
+            if gw:
+                hosts.append(gw)
+            hosts.extend(_HOST_CANDIDATES)
             for host in hosts:
                 try:
                     s = socket.create_connection((host, HOST_RELAY_PORT), timeout=1.0)
@@ -182,76 +147,18 @@ class SensorStream:
                     with self._host_lock:
                         self._host_sock = s
                         self._host_addr = f"{host}:{HOST_RELAY_PORT}"
-                    print(
-                        f"[host] connected to relay {self._host_addr} — Mac can pull :{TCP_PORT}",
-                        flush=True,
-                    )
+                    print(f"[bt-bridge] connected to host relay {self._host_addr}", flush=True)
+                    # flush latest sample immediately
+                    with self._lock:
+                        latest = self._latest
+                    if latest:
+                        line = (json.dumps(latest, separators=(",", ":")) + "\n").encode("utf-8")
+                        self._send_host(line)
                     break
                 except OSError:
                     continue
             else:
-                print(
-                    "[host] waiting for host_tcp_relay.py on Debian "
-                    f"(adb shell → python3 host_tcp_relay.py) port {HOST_RELAY_PORT}",
-                    flush=True,
-                )
-                time.sleep(3)
-
-    def send_sample(self, payload: dict[str, Any]) -> bool:
-        """Send sensor JSON (T/RH/light) — never microphone."""
-        payload = dict(payload)
-        payload.pop("audio_b64", None)
-        payload.pop("mic", None)
-        payload.setdefault("source", "dht11")
-        payload.setdefault("device_id", self.device_id)
-        line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
-        host_ok = self._send_host(line)
-        tcp_ok = self._fanout(self._tcp_clients, self._tcp_lock, line)
-        http_ok = self._post_http(payload) if self.ground_url else False
-        if host_ok or tcp_ok or http_ok:
-            self.sent += 1
-            return True
-        return False
-
-    def _post_http(self, payload: dict[str, Any]) -> bool:
-        if not self.ground_url:
-            return False
-        now = time.time()
-        if now - self._last_http_post < self._http_min_interval_s:
-            return False  # skip this tick; status still shows last HTTP-OK/WAIT
-        self._last_http_post = now
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            self.ground_url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self._http_timeout_s) as resp:
-                ok = 200 <= getattr(resp, "status", 200) < 300
-                self._http_ok = ok
-                self._http_error = None if ok else f"status={getattr(resp, 'status', '?')}"
-                if ok:
-                    print(
-                        f"[http] posted T={payload.get('temp_c')}C "
-                        f"RH={payload.get('humidity_pct')}% "
-                        f"light={payload.get('light')}/100",
-                        flush=True,
-                    )
-                return ok
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            self._http_ok = False
-            self._http_error = str(exc)
-            now = time.time()
-            if now - self._last_http_err_print >= 8.0:
-                self._last_http_err_print = now
-                print(
-                    f"[http] POST failed ({exc}) url={self.ground_url} — "
-                    f"normal on iPhone hotspot. Mac should pull TCP {self.ips or ['board']}:{TCP_PORT}",
-                    flush=True,
-                )
-            return False
+                time.sleep(2)
 
     def _send_host(self, line: bytes) -> bool:
         with self._host_lock:
@@ -271,28 +178,41 @@ class SensorStream:
                 self._host_addr = None
             return False
 
-    @staticmethod
-    def _fanout(clients: list[socket.socket], lock: threading.Lock, line: bytes) -> bool:
-        with lock:
-            current = list(clients)
-        if not current:
+    def _fanout_tcp(self, line: bytes) -> bool:
+        with self._tcp_lock:
+            clients = list(self._tcp_clients)
+        if not clients:
             return False
         alive: list[socket.socket] = []
-        sent_any = False
-        for c in current:
+        any_ok = False
+        for c in clients:
             try:
                 c.sendall(line)
                 alive.append(c)
-                sent_any = True
+                any_ok = True
             except OSError:
                 try:
                     c.close()
                 except OSError:
                     pass
-        with lock:
-            clients[:] = alive
-        return sent_any
+        with self._tcp_lock:
+            self._tcp_clients = alive
+        return any_ok
+
+    def _tcp_server(self) -> None:
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind(("0.0.0.0", TCP_PORT))
+            srv.listen(4)
+            print(f"[tcp] fallback listen :{TCP_PORT}", flush=True)
+            while True:
+                client, addr = srv.accept()
+                print(f"[tcp] client {addr}", flush=True)
+                with self._tcp_lock:
+                    self._tcp_clients.append(client)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[tcp] {exc}", flush=True)
 
 
-# Back-compat aliases used by older main.py imports
 BtSensorStream = SensorStream

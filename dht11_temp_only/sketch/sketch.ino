@@ -1,8 +1,11 @@
 /*
- * Sensor read-only — Arduino UNO Q MCU (fast stream + Serial Monitor)
+ * DHT11 + LDR → App Lab Bridge.notify → host BLE relay → laptop
  *
  * DHT11:  S->D2  U->5V  G->GND
  * LDR:    5V — LDR — A0 — 100k — GND
+ *
+ * This is the sketch that streamed real samples (Bridge.notify every 50 ms,
+ * DHT read at most once a second). Do not poll get_reading from Python.
  */
 
 #include <Arduino.h>
@@ -33,34 +36,11 @@ static int read_light_raw() {
   return (int)(sum / 4);
 }
 
-static void serial_print_sample(int raw) {
-  // App Lab Monitor + classic Serial (both, so Serial Monitor shows data)
-  sample_n++;
-  String line = "#" + String(sample_n);
-  line += "  T=";
-  if (dht_ok && !isnan(last_temp_c)) {
-    line += String(last_temp_c, 1);
-    line += "C";
-  } else {
-    line += "----";
-  }
-  line += "  RH=";
-  if (dht_ok && !isnan(last_humidity)) {
-    line += String(last_humidity, 0);
-    line += "%";
-  } else {
-    line += "----";
-  }
-  line += "  light_raw=";
-  line += String(raw);
-
-  Monitor.println(line);
-  Serial.println(line);
-}
-
 String get_reading(String /*unused*/) {
   String out = "{";
-  out += "\"temp_c\":";
+  out += "\"ok\":";
+  out += dht_ok ? "true" : "false";
+  out += ",\"temp_c\":";
   out += isnan(last_temp_c) ? "null" : String(last_temp_c, 1);
   out += ",\"humidity_pct\":";
   out += isnan(last_humidity) ? "null" : String(last_humidity, 0);
@@ -81,8 +61,8 @@ void setup() {
 
   Bridge.provide("get_reading", get_reading);
 
-  Monitor.println("Serial Monitor: T / RH / light_raw  (~20 Hz light)");
-  Serial.println("Serial Monitor: T / RH / light_raw  (~20 Hz light)");
+  Monitor.println("MCU ready: DHT11+LDR → on_sample");
+  Serial.println("MCU ready: DHT11+LDR → on_sample");
 }
 
 void loop() {
@@ -103,13 +83,28 @@ void loop() {
     }
   }
 
-  serial_print_sample(raw);
+  sample_n++;
+  if ((sample_n % 20) == 0) {
+    Monitor.print("#");
+    Monitor.print(sample_n);
+    Monitor.print(" T=");
+    if (dht_ok) {
+      Monitor.print(last_temp_c, 1);
+      Monitor.print("C RH=");
+      Monitor.print(last_humidity, 0);
+    } else {
+      Monitor.print("---- RH=----");
+    }
+    Monitor.print(" raw=");
+    Monitor.println(raw);
+  }
 
+  // bool is an int to Python; on_sample treats 1 as a good reading.
   Bridge.notify(
       "on_sample",
-      dht_ok,
-      isnan(last_temp_c) ? 0.0 : last_temp_c,
-      isnan(last_humidity) ? 0.0 : last_humidity,
+      dht_ok ? 1.0f : 0.0f,
+      isnan(last_temp_c) ? 0.0f : last_temp_c,
+      isnan(last_humidity) ? 0.0f : last_humidity,
       (float)raw);
 
   delay(LOOP_MS);

@@ -1,4 +1,4 @@
-profiles:
+﻿profiles:
   default:
     fqbn: arduino:zephyr:unoq
     platforms:

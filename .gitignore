@@ -12,8 +12,8 @@ runs/
 .cache/
 uno_q_field_station/python/config.json
 uno_q_field_station/python/config.mock.json
+dht11_temp_only/python/config.json
 uno_q_field_station/data/
-dht11_temp_only_import.zip
 *_import.zip
 wheat_detection/gwhd.yaml
 *.pt
