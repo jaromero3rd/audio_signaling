@@ -310,7 +310,8 @@ def main(argv: list[str] | None = None) -> int:
             n = store.count
             if n == 0:
                 print(
-                    f"still 0 samples — POST {post_url} timed out is expected; waiting for TCP :{BOARD_TCP_PORT}",
+                    f"still 0 samples. On the board: adb shell → python3 host_tcp_relay.py "
+                    f"then Run App Lab. Mac pulls :{BOARD_TCP_PORT}.",
                     flush=True,
                 )
             else:

@@ -7,23 +7,39 @@ That is why you saw `BLE-DOWN` / Errno 2. Sensors still work — use TCP, or run
 Bluetooth on the Debian **host**.
 
 ```
-MCU sensors --Bridge--> App Lab Python --TCP:9123--> laptop     (works now)
-                              \
-                               --TCP:9124--> host_bt_relay.py --BLE--> laptop
+MCU --Bridge--> App Lab container --:9124--> Debian host_tcp_relay --:9123--> Mac
 ```
+
+App Lab cannot POST to the Mac on iPhone hotspot, and cannot expose :9123 on
+the board Wi-Fi IP. The host relay is required.
 
 ---
 
-## Path A — Get data in 2 minutes (TCP / Wi‑Fi)
+## Path A — Host TCP relay (use this)
 
-1. Import this app into App Lab → **Run**
-2. Monitor shows `TCP:9123` and a board IP
-3. On the laptop (same Wi‑Fi):
+1. Board USB to the Mac (ADB). Phone hotspot can stay as the board's Wi-Fi.
+
 ```bash
-python -m ground_station.bt_sensor_recv --tcp <BOARD-IP>:9123
+adb devices
+adb push dht11_temp_only/python/host_tcp_relay.py /tmp/host_tcp_relay.py
+adb shell python3 /tmp/host_tcp_relay.py
 ```
 
-When the laptop connects, Monitor changes from `WAITING-FOR-LAPTOP` to `SENT`.
+Leave that shell open. You want `App Lab on 0.0.0.0:9124` and `Mac pull on 0.0.0.0:9123`.
+
+2. App Lab → **Run** the DHT11 app. Monitor should show `HOST-172.17.0.1:9124` (not only POST failed).
+
+3. Mac:
+
+```bash
+python3 -m ground_station.sensor_recv
+```
+
+It scans `172.20.10.x:9123`. If needed, use the board hotspot IP from the App Lab/host:
+
+```bash
+python3 -m ground_station.sensor_recv --tcp 172.20.10.5:9123
+```
 
 ---
 

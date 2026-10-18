@@ -1,12 +1,7 @@
 """Sensor outbound links from the App Lab Python container.
 
-IMPORTANT (Arduino UNO Q / App Lab):
-  The App container cannot use BlueZ. Do NOT run bless here — it always fails
-  with Errno 2 / missing D-Bus. Bluetooth is done by host_bt_relay.py on the
-  Debian host (see README). This module only:
-
-    1) TCP server :9123  — laptop connects with --tcp <ip>:9123
-    2) TCP client :9124  — forwards JSON to host_bt_relay.py (real BLE)
+App Lab cannot publish :9123 on the board Wi-Fi address. Samples go to
+host_tcp_relay.py on the Debian host (TCP :9124). The Mac pulls host :9123.
 """
 
 from __future__ import annotations
@@ -28,9 +23,9 @@ TCP_PORT = 9123
 HOST_RELAY_PORT = 9124
 HOST_RELAY_CANDIDATES = (
     "127.0.0.1",
-    "172.17.0.1",   # common Docker bridge gateway
+    "172.17.0.1",
     "172.18.0.1",
-    "172.10.0.1",   # mentioned on Arduino forums
+    "172.10.0.1",
 )
 _CONFIG_PATH = Path(__file__).with_name("config.json")
 
@@ -61,6 +56,18 @@ def load_config() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         print(f"[cfg] could not read config.json: {exc}", flush=True)
         return {}
+
+
+def _docker_gateway() -> str | None:
+    try:
+        for line in Path("/proc/net/route").read_text().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 3 and parts[1] == "00000000":
+                raw = int(parts[2], 16)
+                return socket.inet_ntoa(raw.to_bytes(4, "little"))
+    except OSError:
+        return None
+    return None
 
 
 def _local_ips() -> list[str]:
@@ -100,10 +107,9 @@ class SensorStream:
         self._host_lock = threading.Lock()
 
         cfg = load_config()
-        self.ground_url = str(cfg.get("ground_station_url") or "").strip()
-        if not self.ground_url or self.ground_url.lower() == "auto":
-            found = discover_ground_station()
-            self.ground_url = found or ""
+        url = str(cfg.get("ground_station_url") or "").strip()
+        # "auto" scans the Mac and times out on iPhone hotspot. Host relay instead.
+        self.ground_url = "" if (not url or url.lower() == "auto") else url
         self.device_id = str(cfg.get("device_id") or "unoq-dht11")
         self._http_ok = False
         self._http_error: str | None = None
@@ -117,20 +123,16 @@ class SensorStream:
         self.ips = _local_ips()
 
     def start(self) -> None:
+        threading.Thread(target=self._host_client, name="host-9124", daemon=True).start()
         threading.Thread(target=self._tcp_server, name="tcp-9123", daemon=True).start()
-        # No BLE host client by default — sensors go over HTTP to sensor_recv
         time.sleep(0.3)
         self._print_howto()
 
     def _print_howto(self) -> None:
         print("=" * 56, flush=True)
-        print("DHT11 + light. HTTP POST often times out on phone-hotspot isolation;", flush=True)
-        print("the Mac should pull TCP :9123 (sensor_recv does this automatically).", flush=True)
-        print(f"  Board IPs: {', '.join(self.ips) or 'unknown'}  TCP:{TCP_PORT}", flush=True)
-        if self.ground_url:
-            print(f"  HTTP POST (best-effort): {self.ground_url}", flush=True)
-        else:
-            print("  HTTP off — Mac must connect to TCP :9123", flush=True)
+        print("Need host_tcp_relay.py on Debian (adb shell), then Mac sensor_recv.", flush=True)
+        print(f"  Looking for host relay at *: {HOST_RELAY_PORT}", flush=True)
+        print(f"  Container TCP:{TCP_PORT} (not visible on Wi-Fi without the relay)", flush=True)
         print("=" * 56, flush=True)
 
     def status_line(self) -> str:
@@ -141,7 +143,8 @@ class SensorStream:
         with self._tcp_lock:
             n = len(self._tcp_clients)
         tcp = f"TCP:{TCP_PORT} clients={n}" if self._tcp_ok else f"TCP-DOWN({self._tcp_error})"
-        return f"{http} | {tcp}"
+        host = f"HOST-{self._host_addr}" if self._host_addr else "HOST-WAIT"
+        return f"{http} | {tcp} | {host}"
 
     def _tcp_server(self) -> None:
         try:
@@ -161,14 +164,18 @@ class SensorStream:
             print(f"[tcp] failed: {exc}", flush=True)
 
     def _host_client(self) -> None:
-        """Keep trying to reach host_bt_relay.py (real Bluetooth)."""
+        """Push JSON to host_tcp_relay.py on the Debian host (TCP :9124)."""
         while True:
             with self._host_lock:
                 alive = self._host_sock is not None
             if alive:
                 time.sleep(3)
                 continue
-            for host in HOST_RELAY_CANDIDATES:
+            gw = _docker_gateway()
+            hosts = list(HOST_RELAY_CANDIDATES)
+            if gw and gw not in hosts:
+                hosts.insert(0, gw)
+            for host in hosts:
                 try:
                     s = socket.create_connection((host, HOST_RELAY_PORT), timeout=1.0)
                     s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -176,14 +183,19 @@ class SensorStream:
                         self._host_sock = s
                         self._host_addr = f"{host}:{HOST_RELAY_PORT}"
                     print(
-                        f"[ble-host] connected — Bluetooth relay live at {self._host_addr}",
+                        f"[host] connected to relay {self._host_addr} — Mac can pull :{TCP_PORT}",
                         flush=True,
                     )
                     break
                 except OSError:
                     continue
             else:
-                time.sleep(2)
+                print(
+                    "[host] waiting for host_tcp_relay.py on Debian "
+                    f"(adb shell → python3 host_tcp_relay.py) port {HOST_RELAY_PORT}",
+                    flush=True,
+                )
+                time.sleep(3)
 
     def send_sample(self, payload: dict[str, Any]) -> bool:
         """Send sensor JSON (T/RH/light) — never microphone."""
@@ -193,9 +205,10 @@ class SensorStream:
         payload.setdefault("source", "dht11")
         payload.setdefault("device_id", self.device_id)
         line = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+        host_ok = self._send_host(line)
         tcp_ok = self._fanout(self._tcp_clients, self._tcp_lock, line)
-        http_ok = self._post_http(payload)
-        if tcp_ok or http_ok:
+        http_ok = self._post_http(payload) if self.ground_url else False
+        if host_ok or tcp_ok or http_ok:
             self.sent += 1
             return True
         return False
