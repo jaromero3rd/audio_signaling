@@ -34,6 +34,7 @@ class MissionDriver:
         mock: bool,
         drone_id: str = "drone-1",
         auto_approve: bool = False,
+        phone_commands: bool = False,
     ):
         self.mission = mission
         self.mock = mock
@@ -49,10 +50,40 @@ class MissionDriver:
         self._stop_generation = 0
         self._capture = 0
         self._analysis_ready = False
+        self._phone_commands = phone_commands
+        self._phone_start_until = None
 
     def _expire_locked(self) -> None:
         if self._pending and time.monotonic() >= self._pending[1]:
             self._pending = None
+        if self._phone_start_until is not None and time.monotonic() >= self._phone_start_until:
+            self._phone_start_until = None
+
+    def authorize_phone_start(self) -> dict:
+        """Host-only one-shot authorization, never registered as a model tool."""
+        with self._lock:
+            self._expire_locked()
+            if (not self._phone_commands or self._stopped or self._started
+                    or self.mission.snapshot()["phase"] != "idle"):
+                return {"ok": False, "reason": "phone_start_unavailable"}
+            if self._phone_start_until is not None:
+                return {"ok": False, "reason": "phone_start_already_queued"}
+            self._phone_start_until = time.monotonic() + APPROVAL_TTL_S
+            return {"ok": True}
+
+    def cancel_phone_start(self):
+        with self._lock:
+            self._phone_start_until = None
+
+    def approve_phone_start(self, *, flight_ready: bool) -> dict | None:
+        """Camera loop consumes phone authorization only after local preflight."""
+        with self._lock:
+            self._expire_locked()
+            if (self._phone_start_until is None or self._pending is None
+                    or self._pending[0] != "start_survey" or self._stopped or not flight_ready):
+                return None
+            self._phone_start_until = None
+            return self.approve_pending(flight_ready=True)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -116,6 +147,7 @@ class MissionDriver:
 
     def _execute_locked(self, action: Action) -> dict[str, Any]:
         if action == "start_survey":
+            self._phone_start_until = None
             if self._started:
                 return {"ok": False, "reason": "one_survey_per_process"}
             result = self.mission.request_start()
@@ -164,6 +196,7 @@ class MissionDriver:
             self._stop_generation += 1
             self._stopped = True
             self._pending = None
+            self._phone_start_until = None
             self._photo = False
             if self.mission.snapshot()["phase"] not in ("idle", "done"):
                 self.mission.request_abort()

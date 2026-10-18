@@ -309,13 +309,15 @@ class ControllerTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {"PHOTON_API_KEY": "test-private-placeholder",
                                       "ELEVENLABS_API_KEY": "test-private-placeholder",
                                       "ELEVENLABS_AGENT_ID": "test-agent",
-                                      "ELEVENLABS_TTS_VOICE_ID": "test-voice"}):
+                                      "ELEVENLABS_TTS_VOICE_ID": "test-voice",
+                                      "COMMAND_BRIDGE_TOKEN": "synthetic-test-token-not-a-secret-0000"}):
             async with self.controller:
                 runtime = FakeSession.instances[-1].runtime
                 self.assertEqual(runtime.env["PHOTON_API_KEY"], "")
                 self.assertEqual(runtime.env["ELEVENLABS_API_KEY"], "")
                 self.assertEqual(runtime.env["ELEVENLABS_AGENT_ID"], "")
                 self.assertEqual(runtime.env["ELEVENLABS_TTS_VOICE_ID"], "")
+                self.assertEqual(runtime.env["COMMAND_BRIDGE_TOKEN"], "")
                 self.assertNotIn("FACTORY_API_KEY", runtime.env)
 
     async def test_factory_failure_stops_driver_and_removes_workspace(self):

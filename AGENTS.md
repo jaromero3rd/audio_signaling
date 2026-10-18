@@ -18,8 +18,17 @@ optional voice note, not telephony. No ElevenAgents voice command path.
 
 `demo.py` delegates to `voice_mission.main()`. `DroidWorker` owns a
 `DroidController` and one long-lived SDK `Session` off the camera/RC thread.
-Startup waits for Photon inbound text. Photon start queues intent through
-`DroidVoiceGateway`; abort bypasses model latency and stops immediately.
+Startup queues an initial instruction.
+
+Command chain: the operator speaks on the phone. Dictation arrives as iMessage
+text on the Photon direct space; a voice memo may be transcribed with
+ElevenLabs Scribe. The host maps authorized inbound messages onto
+`DroidVoiceGateway`. Abort on that gateway latches host stop immediately.
+Phone ingress is off by default: Python needs `--phone-commands`,
+Bun needs `COMMAND_BRIDGE_ENABLED=true`, and both need the same private
+`COMMAND_BRIDGE_TOKEN`. Both processes run on the drone-connected laptop.
+Only exact start/abort/land commands reach authenticated `127.0.0.1:8787/command`;
+the legacy unauthenticated listener and Python `PhotonInbound` are not started.
 Default mode uses local AprilTag/YOLO steering, with no cloud crop analysis.
 
 With `--crop-analysis`, the pipeline attaches the captured image in the same
@@ -62,7 +71,11 @@ other MCP servers and delegation are denied. Startup checks tool inventory.
 One survey, two extra photos, 12 mission calls/turn, 16 turns/process.
 Default model timeout: 60 seconds. Analysis hold: fixed 90 seconds across
 reimages. Real starts/photos require local `y` approval (60-second TTL);
-start also checks camera/battery. Space stops; `q` exits. Hardware stays in
+start also checks camera/battery. Explicit authenticated phone start replaces
+local `y` for one survey after preflight, never for extra photos. Phone messages
+expire after 30 seconds; one-shot host authorization expires after 60 seconds.
+`--phone-commands` waits rather than starts; `--no-voice` is a legacy no-op.
+Space stops; `q` exits. Hardware stays in
 the camera loop. `--allow-real-flight` is required in addition to approval.
 Do not weaken these gates or treat model text as instructions.
 
@@ -80,8 +93,8 @@ when TTS is configured, ElevenLabs Flash v2.5 MP3; others get text unless
 in memory only. Failed/missing TTS does not block text. Photon upload uses
 multipart/related, content-hash idempotency/dedupe and bounded
 attachment-not-ready retry. Acceptance is not delivery; the queue is not durable.
-Crop summaries send the captured JPEG. Photon inbound text (`survey` / `abort`)
-queues Droid intent via `PhotonInbound` → `DroidVoiceGateway`.
+Crop summaries send the captured JPEG. The opted-in Bun bridge forwards
+exact start/abort/land commands to the authenticated host → `DroidVoiceGateway`.
 
 The active pipeline writes `data/surveys.sqlite3` locally. Optional
 `--chalk` uses the existing named query and fails closed on configured errors.
