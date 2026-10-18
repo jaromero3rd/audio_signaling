@@ -27,7 +27,14 @@ export function spaceContextFor(event: unknown, config: Config): SpaceContextInp
   return { spaceId: space.id, agentId: agent.id, senderId: sender.id };
 }
 
-export function replyFor(event: unknown, config: Config): SendMessageInput | undefined {
+type InboundMessage = {
+  message: Record<string, unknown>;
+  content: Record<string, unknown>;
+  space: Record<string, unknown>;
+  agent: Record<string, unknown>;
+};
+
+function inboundMessage(event: unknown, config: Config): InboundMessage | undefined {
   const envelope = record(event);
   if (envelope.type !== "message.received" || envelope.source !== "imessage.photon") return;
   const data = record(envelope.data);
@@ -41,23 +48,95 @@ export function replyFor(event: unknown, config: Config): SendMessageInput | und
   if (sender.platform !== "imessage" || agent.platform !== "imessage" || space.platform !== "imessage") return;
   if (sender.kind !== "human" || sender.handle !== config.sender) return;
   if (agent.kind !== "agent" || agent.handle !== config.agent || sender.id === agent.id) return;
-  if (space.kind !== "direct" || content.type !== "text" || content.format !== "plain") return;
-  if (typeof content.text !== "string" || !content.text.trim()) return;
+  if (space.kind !== "direct") return;
   if (typeof sender.id !== "string" || !sender.id) return;
   if (typeof message.id !== "string" || !message.id || typeof space.id !== "string" || !space.id) return;
   if (typeof agent.id !== "string" || !agent.id) return;
+  return { message, content, space, agent };
+}
+
+const WORDS: Record<string, number> = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5,
+  six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
+};
+
+function parseNumber(token: string): number | undefined {
+  if (/^\d+$/.test(token)) return Number(token);
+  return WORDS[token];
+}
+
+/** Test-only keyword answers. Does not queue Droid or fly. */
+export function testAnswer(transcript: string): string | undefined {
+  const t = transcript.toLowerCase().replace(/['’]/g, "").replace(/[?!.,]/g, " ").replace(/\s+/g, " ").trim();
+  const sum = t.match(/\b(?:whats|what is)?\s*(\w+)\s+(?:plus|\+)\s+(\w+)\b/);
+  if (sum) {
+    const a = parseNumber(sum[1]);
+    const b = parseNumber(sum[2]);
+    if (a !== undefined && b !== undefined) return String(a + b);
+  }
+  if (/\bpi\b/.test(t)) return "3.14159";
+  return undefined;
+}
+
+export function inboundTextFor(event: unknown, config: Config): string | undefined {
+  const inbound = inboundMessage(event, config);
+  if (!inbound) return;
+  const { content } = inbound;
+  if (content.type !== "text" || content.format !== "plain") return;
+  if (typeof content.text !== "string" || !content.text.trim()) return;
+  return content.text.trim();
+}
+
+export function operatorReply(droidMessage: string): string {
+  const text = droidMessage.replace(/\s+/g, " ").trim().slice(0, 1500);
+  return text || "Droid did not return a message.";
+}
+
+export function audioRefFor(event: unknown, config: Config): { messageId: string; attachmentId: string } | undefined {
+  const inbound = inboundMessage(event, config);
+  if (!inbound) return;
+  const { message, content } = inbound;
+  if (content.type !== "attachment" && content.type !== "voice") return;
+  if (typeof content.attachmentId !== "string" || !content.attachmentId) return;
+  return { messageId: message.id as string, attachmentId: content.attachmentId };
+}
+
+export function commandReplyFor(
+  event: unknown,
+  config: Config,
+  bodyText: string,
+  kind: "text" | "voice" = "text",
+): SendMessageInput | undefined {
+  const inbound = inboundMessage(event, config);
+  if (!inbound) return;
+  const { message, space, agent } = inbound;
+  const key = kind === "voice" ? `photon-voice-v1:${message.id}` : `photon-echo-v2:${message.id}`;
   return {
     path: { id: config.project },
-    headers: { "idempotency-key": `photon-echo-v2:${message.id}` },
+    headers: { "idempotency-key": key },
     body: {
-      spaceId: space.id,
-      senderId: agent.id,
-      // Shared iMessage Spaces support ordinary sends, not threaded replies.
+      spaceId: space.id as string,
+      senderId: agent.id as string,
       content: {
         type: "text",
         format: "plain",
-        text: `Photon Spectrum is connected. You said: ${content.text}`,
+        text: operatorReply(bodyText),
       },
     },
   };
+}
+
+export function replyFor(event: unknown, config: Config): SendMessageInput | undefined {
+  const text = inboundTextFor(event, config);
+  if (!text) return;
+  return commandReplyFor(event, config, `Queued for Droid: ${text}`);
+}
+
+export function audioReplyFor(
+  event: unknown,
+  config: Config,
+  transcript: string,
+): SendMessageInput | undefined {
+  if (!audioRefFor(event, config)) return;
+  return commandReplyFor(event, config, transcript, "voice");
 }

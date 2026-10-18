@@ -1,4 +1,9 @@
-"""Host-owned Photon Beta iMessage notifications, never exposed as model tools."""
+"""Host-owned Photon Beta iMessage.
+
+Command chain: phone voice → this direct space inbound → DroidVoiceGateway.
+Data chain: this module's outbound status, JPEG, and voice notes.
+Never exposed as model tools.
+"""
 
 from __future__ import annotations
 

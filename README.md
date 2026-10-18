@@ -1,35 +1,49 @@
 # AgriDrone: Voice-Directed Field Surveys
 
-A prototype with local AprilTag/YOLO steering, bounded Factory Droid decisions,
-ElevenLabs operator voice input, and Photon iMessage notifications.
+A prototype with two independent chains: operator activation over iMessage, and
+a field data stream for photos, telemetry, and crop summaries.
 
 | Concern | Provider |
 | --- | --- |
+| Operator activation (command chain) | Voice on the phone → iMessage → Photon inbound → DroidVoiceGateway → Droid |
 | Mission decisions and crop-health image analysis | One persistent Factory Droid SDK session, native image input |
-| Operator speech to commands | ElevenAgents, with Scribe transcription and ElevenLabs speech inside the platform |
-| Drone to user text, images, voice notes | Photon direct iMessage space |
+| Field data stream | Drone/camera/sensors → host → optional Droid score + Chalk weather → store |
+| Data-chain alerts back to the operator | Photon outbound: text, survey JPEG, ElevenLabs voice note |
 | Optional decision features | Chalk, or explicitly labeled local thresholds |
+
+The command chain activates the mission. The data stream never starts a flight.
+Laptop ElevenAgents is a local fallback when `--no-voice` is omitted and Photon
+command ingress is not used. `--no-voice` asks Droid for one survey from the host.
 
 **Photon cannot place calls.** An urgent alert is text marked URGENT plus an
 audio attachment, not a telephone call. No telephony integration is used.
 Crop-health scores are uncertain visual estimates, not verified diagnoses.
 
-## How Droid is used at runtime
+## Command chain (activate)
 
 ```text
-Operator → ElevenAgents client tool → DroidVoiceGateway → persistent Droid
-                                                        ↓
-                                            host tools / local approval
-                                                        ↓
-                           camera → local steering → captured image
-                                                        ↓
-                              same Droid session: native Image attachment
-                                                        ↓
-                   strict JSON → host validation → optional Chalk / history
-                                                        ↓
-                     same turn: decision tool + matching final JSON
-                                                        ↓
-                bounded reimage / Photon alert / return home / land
+operator voice on phone
+    → iMessage (dictation text or voice memo)
+    → Photon direct space (inbound)
+    → ground station maps authorized text to DroidVoiceGateway
+    → persistent Droid queues start_survey
+    → local y approval
+    → drone adapter takeoff
+```
+
+iPhone dictation is already text; that text is the command. A voice memo is
+audio on the same Photon space; the host may transcribe it with ElevenLabs
+Scribe before the same gateway. Spacebar on the laptop remains the fast stop.
+An iMessage abort is slower than local stop.
+
+## Data stream (separate)
+
+```text
+camera → local AprilTag/YOLO steering → captured image
+    → same Droid session: native Image attachment (only with --crop-analysis)
+    → strict JSON → host validation → optional Chalk / history
+    → same turn: decision tool + matching final JSON
+    → bounded reimage / Photon outbound alert / return home / land
 ```
 
 Default mode does not upload photos: Droid handles high-level requests while
@@ -37,7 +51,7 @@ AprilTag/YOLO steer locally. `--crop-analysis` enables the image turn and a
 fixed 90-second hover deadline. Reimages do not renew that deadline.
 After accepting the Droid score, crop analysis joins it with live NOAA/NASA
 weather through Chalk, stores the joined record when `CHALK_CLIENT_ID` is set,
-and sends the insight, JPEG, and an ElevenLabs clip through Photon.
+and sends the insight, JPEG, and an ElevenLabs clip through Photon outbound.
 Invalid JSON, a failed model turn, or narration without a decision stops the
 mission and requests landing. Emergency stop bypasses cloud latency.
 
@@ -69,14 +83,16 @@ python demo.py --mock --target tag --target-tag 12 --home-tag 12 \
 `--fake-analysis` is explicitly simulated and forbidden on real hardware.
 It is not a fallback for a failed model. A webcam demo is not a headless test.
 
-With a configured ElevenAgents agent, omit `--no-voice`. To enable native
-image analysis, replace `--fake-analysis` with `--crop-analysis`.
-Both use the same persistent Droid session.
-
 Photon credentials enable **real iMessages even in mock mode**, labeled MOCK.
-Keep `--no-photon` for local-only runs. Critical analysis alerts requested by
-Droid get text plus a voice note when TTS is configured. Non-critical alerts
-are text-only unless the operator passes `--voice-notes`.
+Keep `--no-photon` for local-only runs. The same direct space is command
+ingress (phone → Photon → Droid) and data-chain egress (survey text/JPEG/audio).
+To enable native image analysis on the data stream, replace `--fake-analysis`
+with `--crop-analysis`. Both use the same persistent Droid session.
+
+Laptop ElevenAgents remains a local fallback when you omit `--no-voice`.
+Critical analysis alerts requested by Droid get text plus a voice note when
+TTS is configured. Non-critical alerts are text-only unless the operator
+passes `--voice-notes`.
 
 The authenticated smoke test is opt-in:
 
@@ -97,8 +113,8 @@ ElevenLabs transports and no hardware. It is not part of fake-only validation.
   Missing or failed TTS does not prevent the independent text attempt.
 - Notifications are best effort, not a durable outbox. Accepted is not delivered.
 - Photon upload supports image attachments; crop analysis sends its captured
-  JPEG with the weather insight and audio clip. Incoming mission commands are
-  not wired.
+  JPEG with the weather insight and audio clip on the data chain.
+  Operator activation uses the same space inbound: phone voice → Photon → Droid.
 
 See the [runtime guide](ground_station/agent/README.md), [technical guide](README_TECHNICAL.md),
 and [requirements](prd.md). Local history is `data/surveys.sqlite3`; optional

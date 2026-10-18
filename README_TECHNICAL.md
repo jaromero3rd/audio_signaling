@@ -4,9 +4,11 @@
 
 | Concern | Provider / owner |
 | --- | --- |
+| Operator activation (command chain) | Phone voice → iMessage → Photon inbound → DroidVoiceGateway → Droid |
 | Mission reasoning and crop-health image input | Persistent Factory Droid SDK session |
-| Operator voice input and spoken replies | ElevenAgents, Scribe + ElevenLabs TTS configured in dashboard |
-| Operator text, image attachments and voice-note delivery | Photon direct iMessage space |
+| Field data stream | Drone/camera/sensors → host → optional Droid score + Chalk → store |
+| Data-chain alerts and spoken summaries | Photon outbound + ElevenLabs TTS voice notes |
+| Laptop voice fallback | ElevenAgents client tools on the ground laptop |
 | Optional crop decision features | Chalk; local thresholds otherwise |
 | Per-frame detection, RC, hardware and emergency stop | Local Python host |
 
@@ -21,12 +23,22 @@ even with `--no-voice`; that flag never grants real-hardware approval.
 The legacy direct voice/auto controller is no longer supported.
 
 `DroidWorker` runs one `DroidController` in a background thread, serializing
-`Session.stream` turns. `DroidVoiceGateway` translates client-tool start into
-queued intent, status into a driver snapshot, and abort directly into host
-stop. Neither voice nor Droid calls the drone adapter.
+`Session.stream` turns. Operator activation is a **command chain** separate
+from the **data stream**.
 
-Default mode uses local AprilTag/YOLO detection, with no cloud crop diagnosis.
-`--crop-analysis` enables:
+Command chain: the operator speaks on the phone. iMessage dictation arrives as
+plain text on the Photon direct space; a voice memo arrives as audio on that
+same space and may be transcribed with ElevenLabs Scribe. The host maps an
+authorized inbound message onto `DroidVoiceGateway` (start queues intent,
+status reads a driver snapshot, abort latches host stop). Neither Photon nor
+Droid calls the drone adapter. Local `y` still approves real takeoff.
+
+Laptop ElevenAgents is a fallback on the same gateway. `--no-voice` skips
+laptop voice and does not disable Photon command ingress.
+
+The data stream never activates a flight. Default mode uses local
+AprilTag/YOLO detection, with no cloud crop diagnosis.
+`--crop-analysis` enables the data-stream image turn:
 
 ```text
 camera photo → host capture ID + fixed hold deadline
@@ -84,7 +96,22 @@ Safety controls:
 
 These are prototype safeguards, not flight-safety certification.
 
-## ElevenAgents input
+## Command chain: phone → Photon → Droid
+
+Photon inbound on the configured direct space is the operator activation path.
+Authorized plain-text iMessages are command intent. iPhone dictation is text
+before Photon sees it. Voice memos are attachments on the same space.
+
+The host, not the model, decides which inbound messages become
+`DroidVoiceGateway.request_start`, `request_abort`, or a status snapshot.
+Queued start is never takeoff. Spacebar remains the fast emergency stop.
+The standalone TypeScript agent currently proves connectivity with an echo;
+mission mapping belongs on the Python host next to `PhotonNotifier`.
+
+Field PCM from the UNO Q (`sensor_recv` `/mic`) is **data**, not activation.
+See [VOICE_CHAIN_SPEC.md](VOICE_CHAIN_SPEC.md).
+
+## Laptop ElevenAgents fallback
 
 `voice_eleven.py` uses the pinned ElevenLabs SDK, an authenticated private
 dashboard agent and three locally registered client tools:
@@ -103,7 +130,7 @@ transcription, an ElevenLabs voice, and permit the runtime safety-prompt overrid
 See [SETUP.md](SETUP.md). Contextual updates are labeled untrusted and do not
 impersonate new operator requests. Queued start never means takeoff.
 
-## Photon output and voice notes
+## Data chain: Photon outbound and voice notes
 
 `photon.py` validates an active project/assignment and an existing direct
 space with exactly the configured human and agent. It does not create users
@@ -133,9 +160,11 @@ Ordinary text has its own stable key.
 Audio is an attachment, not guaranteed to display as Apple's native voice-note
 bubble. Acceptance is not delivery. The in-memory queue is best effort and
 process exit may leave sends pending. The client also supports image uploads;
-the mission does not automatically send captured images or accept incoming
-Photon commands. The standalone TypeScript messaging agent is separate.
-Configured mock missions still send real messages unless `--no-photon`.
+crop analysis on the data chain sends the captured JPEG with the weather
+insight. Operator activation uses the same space inbound (phone → Photon →
+Droid). The standalone TypeScript messaging agent is a connectivity echo,
+not the mission mapper. Configured mock missions still send real outbound
+messages unless `--no-photon`.
 
 ## SDK isolation, features and storage
 

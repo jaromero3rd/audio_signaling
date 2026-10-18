@@ -4,11 +4,19 @@ This is a **Photon 2.0 Beta** agent, not the legacy `spectrum-ts` product.
 It uses `@photon-ai/api` and the beta Socket.IO event stream. The legacy
 Photon CLI and `create-spectrum-project` do not configure beta projects.
 
-Only iMessage is handled. An authorized sender's plain-text direct message
-receives:
+The mission command chain is: operator voice on the phone → this iMessage
+space → Photon inbound → Python host → Droid. This TypeScript process is a
+connectivity echo, not the Droid mapper. The data stream (survey JPEG, status
+text, voice notes) uses the same space outbound from Python `photon.py`.
+
+Only iMessage is handled. Authorized plain text or a voice memo is transcribed
+with ElevenLabs Scribe. This test replies with the transcript and, if you ask
+`what's two plus two` or say `pi`, the answer. It does not activate the drone.
 
 ```text
-Photon Spectrum is connected. You said: <message>
+Heard: what's two plus two
+Answer: 4
+Test only. Drone not activated.
 ```
 
 ## Local commands

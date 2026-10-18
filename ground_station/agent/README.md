@@ -1,8 +1,11 @@
 # Embedded Factory Droid runtime
 
 One official SDK `Session` handles operator intent and native crop images.
-The host owns approval, deterministic local steering, capture paths, notification
-recipients, and every hardware call. See [setup](../../SETUP.md).
+Operator activation is the command chain: voice on the phone → iMessage →
+Photon inbound → `DroidVoiceGateway` → Droid. The field data stream (photos,
+telemetry, crop scores, weather join, outbound alerts) is separate and never
+starts a flight. The host owns approval, local steering, capture paths,
+notification recipients, and every hardware call. See [setup](../../SETUP.md).
 
 ## Tools and authority
 
@@ -42,8 +45,9 @@ It never replaces failed real analysis.
 ## Gates and lifecycle
 
 `DroidWorker` serializes turns off the camera/RC thread. Startup queues an
-instruction, voice starts queue intent, and emergency stop directly latches
-the host driver. ElevenAgents is not another mission authority.
+instruction. Photon inbound from the phone queues intent on `DroidVoiceGateway`.
+Emergency stop latches the host driver. Laptop ElevenAgents is a fallback on
+that same gateway, not another mission authority.
 
 Real starts/photos require local `y` approval with a 60-second TTL, including
 `--no-voice`. Starts also require camera/battery preflight. A queued request is
@@ -64,9 +68,10 @@ effective tool inventory. This is a tool-policy boundary, **not an OS sandbox**.
 
 The CLI runs in a temporary directory. Photon, ElevenLabs (`ELEVENLABS_`),
 Chalk and other service credentials are suppressed in its environment.
-Factory authentication remains available. Native image bytes and validated
-observations go to Factory; speech goes to ElevenLabs; formatted alerts/audio
-go to Photon. Model summaries and history remain untrusted data.
+Factory authentication remains available. Native image bytes and validated observations go to Factory on the data
+chain. Operator speech is phone → Photon inbound (optional ElevenLabs Scribe
+for voice memos). Formatted alerts/audio go to Photon outbound. Model
+summaries and history remain untrusted data.
 
 ## Features and persistence
 
@@ -80,7 +85,7 @@ Chalk Volume helpers in `store.py` and the older `DroidSession` are separate,
 loaded lazily, and not part of the mission runtime. Their snapshots/log/cache
 do not replace the pipeline's local SQLite history.
 
-## Photon system-to-user messaging
+## Photon: command ingress and data-chain messaging
 
 Fixed host events cover acknowledged takeoff/landing, saved photo, completion,
 abort, and controller failure. Droid may also request a current-analysis alert.
@@ -98,8 +103,9 @@ responses reuse the same message key and body.
 **Photon cannot place calls.** An urgent voice note is an ordinary iMessage
 audio attachment, not telephony and not a guaranteed native voice-message UI.
 The queue is best effort, not durable. Accepted never means delivered.
-Photo upload is supported at the client boundary; automatic photo sending and
-incoming Photon mission commands are not implemented.
+Photo upload is supported at the client boundary. Crop-analysis JPEGs travel
+on the data chain outbound. Operator activation uses the same space inbound
+(phone → Photon → Droid). The TypeScript echo agent is connectivity only.
 
 ## Verification
 
