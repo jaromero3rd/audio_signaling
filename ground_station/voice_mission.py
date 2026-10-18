@@ -35,6 +35,23 @@ from ground_station.vision import DEFAULT_WEIGHTS, Box
 VOICE_READY_S = 20.0
 
 
+def latch_mission_abort(driver, phase: str) -> bool:
+    """Latch the host stop when the state machine aborts on its own.
+
+    Analysis timeout and stale video request landing without going through
+    MissionDriver.stop(). Until that stop is latched, the abort falls through
+    to phase done and looks like a finished survey.
+    """
+    if driver is None or phase != "abort" or driver.snapshot()["stopped"]:
+        return False
+    driver.stop()
+    return True
+
+
+def survey_finished(phase: str, *, flying: bool, stopped: bool) -> bool:
+    return phase == "done" and not flying and not stopped
+
+
 def draw_hud(
     frame: np.ndarray,
     mission: SurveyMission,
@@ -370,6 +387,7 @@ def _run_mission(args, photon, cleanup) -> int:
 
             tick = mission.tick(frame, t0)
             snap = mission.snapshot()
+            latch_mission_abort(driver, snap["phase"])
 
             stopped = driver is not None and driver.snapshot()["stopped"]
             if stopped and flying:
@@ -405,7 +423,8 @@ def _run_mission(args, photon, cleanup) -> int:
             if photon is not None:
                 if droid is not None and droid.failed.is_set():
                     photon.notify("controller_failed")
-                if snap["phase"] == "done" and not flying and (driver is None or not driver.snapshot()["stopped"]):
+                stopped_now = driver is not None and driver.snapshot()["stopped"]
+                if survey_finished(snap["phase"], flying=flying, stopped=stopped_now):
                     photon.notify("complete")
 
             # A cloud decision may have changed the phase after tick. Never

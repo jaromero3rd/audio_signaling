@@ -47,6 +47,27 @@ def _print_sample(sample: dict) -> None:
     )
 
 
+def _parse_serial_text(text: str) -> dict | None:
+    """MCU Serial Monitor lines: #12  T=22.1C  RH=40%  light_raw=123"""
+    import re
+
+    m = re.search(
+        r"T=(?P<t>[\d.]+|----)C?\s+RH=(?P<rh>[\d.]+|----)%?\s+light_raw=(?P<raw>-?\d+)",
+        text,
+    )
+    if not m:
+        return None
+    t, rh = m.group("t"), m.group("rh")
+    return {
+        "ok": t != "----",
+        "source": "serial",
+        "sensor": "DHT11",
+        "temp_c": None if t == "----" else float(t),
+        "humidity_pct": None if rh == "----" else float(rh),
+        "light_raw": int(m.group("raw")),
+    }
+
+
 def _handle_line(text: str, log_path: Path | None) -> None:
     text = text.strip()
     if not text:
@@ -54,8 +75,10 @@ def _handle_line(text: str, log_path: Path | None) -> None:
     try:
         sample = json.loads(text)
     except json.JSONDecodeError:
-        print(f"[raw] {text}", flush=True)
-        return
+        sample = _parse_serial_text(text)
+        if sample is None:
+            print(f"[raw] {text}", flush=True)
+            return
     _print_sample(sample)
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +203,24 @@ async def run_ble(log_path: Path | None, timeout: float) -> int:
     return 0
 
 
+def _pick_usb_serial() -> str:
+    try:
+        from serial.tools import list_ports
+    except ImportError as exc:
+        raise RuntimeError("pip install pyserial") from exc
+    ports = list(list_ports.comports())
+    if not ports:
+        raise RuntimeError("No serial ports. Plug the Uno Q into this computer over USB.")
+    print("Serial ports:")
+    for p in ports:
+        print(f"  {p.device}  {p.description}")
+    for p in ports:
+        name = f"{p.device} {p.description}".lower()
+        if any(tok in name for tok in ("usbmodem", "usbserial", "acm", "uno", "arduino")):
+            return p.device
+    return ports[0].device
+
+
 def run_com(port: str, log_path: Path | None, baud: int) -> int:
     try:
         import serial
@@ -233,7 +274,10 @@ def run_tcp(target: str, log_path: Path | None) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Receive UNO Q Bluetooth/TCP sensor stream")
     p.add_argument("--timeout", type=float, default=25.0, help="BLE scan timeout")
-    p.add_argument("--com", help="Classic BT serial port, e.g. COM5 (Windows)")
+    p.add_argument(
+        "--com",
+        help="USB serial: 'auto' or a port like /dev/cu.usbmodem1101 or COM5",
+    )
     p.add_argument(
         "--tcp",
         help="TCP to App Lab stream, e.g. 192.168.1.50:9123 (works when BLE is blocked)",
@@ -255,7 +299,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.tcp:
             return run_tcp(args.tcp, log_path)
         if args.com:
-            return run_com(args.com, log_path, args.baud)
+            port = args.com
+            if port.lower() in ("auto", "list"):
+                port = _pick_usb_serial()
+                print(f"Using {port}")
+            baud = args.baud if args.baud != 9600 else 115200
+            return run_com(port, log_path, baud)
         return asyncio.run(run_ble(log_path, args.timeout))
     except KeyboardInterrupt:
         print("\nbye")
