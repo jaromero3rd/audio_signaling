@@ -24,6 +24,9 @@ Default mode uses local AprilTag/YOLO steering, with no cloud crop analysis.
 With `--crop-analysis`, the pipeline attaches the captured image in the same
 persistent session using `session.stream(..., images=[Image.from_bytes(...)])`.
 JPEG/PNG/GIF/WebP must be nonempty and ≤ 5 MiB. No tool accepts a file path.
+After the score is accepted, the host joins it with live NOAA/NASA weather in
+Chalk, stores the joined record when `CHALK_CLIENT_ID` is set, and sends the
+insight, JPEG, and an ElevenLabs clip through Photon.
 
 Within one model turn:
 
@@ -76,14 +79,14 @@ TTS limits: 3,500 text characters, 5 MiB audio, in memory only.
 Failed/missing TTS does not block text. Photon upload uses multipart/related,
 content-hash idempotency/dedupe and bounded attachment-not-ready retry.
 Acceptance is not delivery; the queue is not durable.
-The client supports images, but automatic photo sending and incoming Photon
-mission commands are not wired.
+Crop summaries send the captured JPEG; incoming Photon mission commands are
+not wired.
 
 The active pipeline writes `data/surveys.sqlite3` locally. Optional
 `--chalk` uses the existing named query and fails closed on configured errors.
-`store.py` Chalk Volume helpers and legacy `DroidSession` are separate, lazy
-imports, not active mission persistence. No flight resumes automatically.
-Standalone `chalk_eval_mission.py` is no longer called by `voice_mission`.
+Crop analysis additionally uses `store.py` for the joined record when Chalk is
+configured. Legacy `DroidSession` remains separate, and no flight resumes
+automatically.
 
 ## Setup and validation
 

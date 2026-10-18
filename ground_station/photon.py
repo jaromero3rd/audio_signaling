@@ -225,6 +225,22 @@ class PhotonClient:
             raise PhotonError("Photon accepted no valid message identifier")
         return {"id": message_id, "status": result.get("status", "unknown")}
 
+    def send_text(self, text: str, event_id: str) -> dict:
+        """Free-form text over the verified route (voice/test paths, not model tools)."""
+        if self._route is None:
+            raise PhotonError("Photon routing has not been verified")
+        space_id, sender_id = self._route
+        result = self._request(
+            "POST", f"/v1/projects/{self.config.project}/messages",
+            headers={"idempotency-key": f"agridrone-v1:{event_id}"},
+            json={"spaceId": space_id, "senderId": sender_id,
+                  "content": {"type": "text", "format": "plain", "text": text}},
+        )
+        message_id = result.get("id")
+        if not isinstance(message_id, str) or not RESOURCE_ID.fullmatch(message_id):
+            raise PhotonError("Photon accepted no valid message identifier")
+        return {"id": message_id, "status": result.get("status", "unknown")}
+
     def upload_attachment(self, data: bytes, *, content_type: str) -> str:
         """Photon multipart/related: metadata, then bytes. Identical retries stay identical."""
         types = {"audio/mpeg": "alert.mp3", "image/jpeg": "survey.jpg",

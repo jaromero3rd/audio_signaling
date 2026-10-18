@@ -301,6 +301,7 @@ def _run_mission(args, photon, cleanup) -> int:
                 driver, analyzer, field_id=args.field_id, photon=photon,
                 history_path=ROOT / "data" / "surveys.sqlite3",
                 chalk=args.chalk, chalk_branch=args.chalk_branch,
+                weather=True, deliver=True,
             )
             print("Crop analysis on: native image → persistent Droid → host validation → decision.")
         else:
