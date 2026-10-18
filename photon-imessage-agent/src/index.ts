@@ -20,43 +20,62 @@ function report(error: unknown) {
   }
 }
 
+const dispatchedIds = new Set<string>();
+
+function voiceFail(event: unknown, config: ReturnType<typeof configuration>, message: string) {
+  return audioReplyFor(event, config, message);
+}
+
 async function voiceReply(
   photon: Photon,
   config: ReturnType<typeof configuration>,
   event: unknown,
   attachmentId: string,
+  inboundId?: string,
 ) {
-  const key = process.env.ELEVENLABS_API_KEY ?? "";
-  if (!key.trim()) throw new SetupError("Missing ELEVENLABS_API_KEY.");
-  let blob: Blob | undefined;
-  for (let attempt = 0; attempt < 8; attempt++) {
+  try {
+    const key = process.env.ELEVENLABS_API_KEY ?? "";
+    if (!key.trim()) {
+      return voiceFail(event, config, "Voice memo received, but transcription is not configured on the laptop.");
+    }
+    let blob: Blob | undefined;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        blob = await photon.projects.downloadAttachment({
+          path: { id: config.project, attachmentId },
+        });
+        break;
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 409) {
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          continue;
+        }
+        return voiceFail(event, config, "Could not download the voice memo. Try sending text instead.");
+      }
+    }
+    if (!blob) return voiceFail(event, config, "Voice memo was not ready. Try sending text instead.");
+    let filename = "voice.m4a";
     try {
-      blob = await photon.projects.downloadAttachment({
+      const meta = await photon.projects.getAttachment({
         path: { id: config.project, attachmentId },
       });
-      break;
-    } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        continue;
-      }
-      throw error;
+      if (typeof meta.filename === "string" && meta.filename.trim()) filename = meta.filename.trim();
+    } catch { /* filename is best-effort */ }
+    let transcript: string;
+    try {
+      transcript = await transcribeAudio(blob, filename, key);
+    } catch {
+      return voiceFail(event, config, "Could not transcribe the voice memo. Try sending text instead.");
     }
+    const droid = await dispatchToDroid(transcript, inboundId);
+    return audioReplyFor(event, config, droid);
+  } catch {
+    return voiceFail(event, config, "Could not process the voice memo. Try sending text instead.");
   }
-  if (!blob) throw new SetupError("Voice attachment never became ready.");
-  let filename = "voice.m4a";
-  try {
-    const meta = await photon.projects.getAttachment({
-      path: { id: config.project, attachmentId },
-    });
-    if (typeof meta.filename === "string" && meta.filename.trim()) filename = meta.filename.trim();
-  } catch { /* filename is best-effort */ }
-  const transcript = await transcribeAudio(blob, filename, key);
-  const droid = await dispatchToDroid(transcript);
-  return audioReplyFor(event, config, droid);
 }
 
-async function dispatchToDroid(text: string): Promise<string> {
+async function dispatchToDroid(text: string, inboundId?: string): Promise<string> {
+  if (inboundId && dispatchedIds.has(inboundId)) return "Already forwarded to Droid.";
   const url = (process.env.DROID_COMMAND_URL || "http://127.0.0.1:8766/operator-command").trim();
   try {
     const response = await fetch(url, {
@@ -67,8 +86,11 @@ async function dispatchToDroid(text: string): Promise<string> {
     });
     if (!response.ok) return "Droid ingest failed on the laptop.";
     const payload = await response.json() as { message?: unknown; ok?: unknown };
-    if (typeof payload.message === "string" && payload.message.trim()) return operatorReply(payload.message);
-    return payload.ok === false ? "Droid rejected the request." : "Queued for Droid.";
+    const reply = typeof payload.message === "string" && payload.message.trim()
+      ? operatorReply(payload.message)
+      : payload.ok === false ? "Droid rejected the request." : "Queued for Droid.";
+    if (inboundId) dispatchedIds.add(inboundId);
+    return reply;
   } catch {
     return "Droid is not running on the laptop. Start demo.py so Photon can reach Droid.";
   }
@@ -171,10 +193,12 @@ async function main() {
       if (ctx) spaces.write(ctx);
       const audio = audioRefFor(event, config);
       const spoken = inboundTextFor(event, config);
+      const inboundMessage = record(record(record(event).data).object);
+      const inboundId = audio?.messageId ?? (typeof inboundMessage.id === "string" ? inboundMessage.id : undefined);
       const input = audio
-        ? await voiceReply(photon, config, event, audio.attachmentId)
+        ? await voiceReply(photon, config, event, audio.attachmentId, inboundId)
         : spoken
-          ? commandReplyFor(event, config, await dispatchToDroid(spoken))
+          ? commandReplyFor(event, config, await dispatchToDroid(spoken, inboundId))
           : undefined;
       if (input) {
         console.info(audio
@@ -207,10 +231,12 @@ async function main() {
       state.commit(seq);
     }).catch(error => {
       report(error);
-      if (error instanceof SetupError) fatal("Event handling stopped without advancing its saved cursor.");
+      const transcribeFail = error instanceof Error && /speech-to-text|transcript|ELEVENLABS_API_KEY|never became ready/i.test(error.message);
+      if (error instanceof SetupError && !transcribeFail) fatal("Event handling stopped without advancing its saved cursor.");
       if (error instanceof ApiError && [400, 401, 403, 409, 422].includes(error.status)) {
         fatal("Reply blocked by Photon. Fix the API permission or message error before restarting.");
       }
+      if (transcribeFail) return;
       if (generation === epoch) {
         epoch++;
         socket.io.engine.close();

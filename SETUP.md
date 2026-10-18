@@ -21,12 +21,16 @@ is a separate chain and does not start a flight.
 
 1. Use the Photon direct space in the next section. The operator's iPhone is
    the microphone. Dictation sends plain text; a voice memo sends audio.
-2. Authorized inbound messages are command intent for the ground station.
+2. From `photon-imessage-agent`, run `bun run src/index.ts --check` then
+   `bun start` while `python demo.py --mock` (or `--no-voice`) is running so
+   ingest on `127.0.0.1:8766` is up. `DROID_COMMAND_URL` defaults to
+   `http://127.0.0.1:8766/operator-command`.
+3. Authorized inbound messages are command intent for the ground station.
    Map start/status/abort onto `DroidVoiceGateway`. Queued start is never
    takeoff. Local `y` still approves real hardware.
-3. Spacebar on the laptop remains the fast emergency stop. An iMessage abort
+4. Spacebar on the laptop remains the fast emergency stop. An iMessage abort
    is slower than local stop.
-4. Photon cannot place calls. This is iMessage in and iMessage out.
+5. Photon cannot place calls. This is iMessage in and iMessage out.
 
 Laptop ElevenAgents below is a local fallback when the operator is at the
 ground station. `--no-voice` skips that fallback and does not disable Photon

@@ -47,14 +47,7 @@ class OperatorCommandServer:
                     payload = {"ok": False, "reason": "empty", "message": "Empty operator request.", "executed": False}
                 else:
                     mapped = map_intent(text, gateway)
-                    result = mapped.get("result") or {}
-                    payload = {
-                        "ok": bool(result.get("ok", True)),
-                        "intent": mapped.get("intent"),
-                        "status": result.get("status"),
-                        "executed": bool(result.get("executed", False)),
-                        "message": result.get("message") or _message_for(mapped),
-                    }
+                    payload = _payload_for(mapped)
                 data = json.dumps(payload).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -75,6 +68,56 @@ class OperatorCommandServer:
         if self._thread is not None:
             self._thread.join(timeout=3)
             self._thread = None
+
+
+def _payload_for(mapped: dict) -> dict:
+    result = mapped.get("result") or {}
+    intent = mapped.get("intent")
+    reason = result.get("reason")
+    ok_flag = result.get("ok")
+    if intent == "status":
+        ok = False if ok_flag is False or reason else True
+    else:
+        ok = True if ok_flag is None else bool(ok_flag)
+    if not ok:
+        message = result.get("message") or _failure_message(result)
+    elif intent == "status":
+        message = result.get("message") or _status_message(result)
+    else:
+        message = result.get("message") or _message_for(mapped)
+    payload = {
+        "ok": ok,
+        "intent": intent,
+        "status": result.get("status"),
+        "executed": bool(result.get("executed", False)),
+        "message": message,
+    }
+    if reason:
+        payload["reason"] = reason
+    return payload
+
+
+def _failure_message(result: dict) -> str:
+    detail = result.get("reason") or result.get("status") or "rejected"
+    return f"Droid rejected the request ({detail})."
+
+
+def _status_message(result: dict) -> str:
+    mission = result.get("mission") if isinstance(result.get("mission"), dict) else {}
+    phase = result.get("phase") or mission.get("phase")
+    bits = []
+    if result.get("survey_started"):
+        bits.append("survey started")
+    elif phase:
+        bits.append(f"phase {phase}")
+    pending = result.get("pending_approval")
+    if pending:
+        bits.append(f"pending {pending}")
+    if result.get("stopped"):
+        bits.append("stopped")
+    if not bits:
+        bits.append("unknown")
+    return "Status: " + ", ".join(bits) + "."
 
 
 def _message_for(mapped: dict) -> str:

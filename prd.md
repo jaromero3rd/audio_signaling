@@ -66,7 +66,8 @@ No successful narration or JSON-only response can replace a decision tool.
 
 Operator activation uses Photon inbound on the same direct space
 (phone → Photon → Droid). Crop-analysis JPEG sending is data-chain egress.
-The TypeScript echo agent is connectivity only. No automatic mission restart,
+The TypeScript Photon agent is the inbound command bridge (text → loopback
+ingest → Droid). It does not fly by itself. No automatic mission restart,
 verified agronomic diagnosis or phone calling is claimed.
 
 ## Acceptance and publication

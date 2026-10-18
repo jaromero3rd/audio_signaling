@@ -105,8 +105,11 @@ before Photon sees it. Voice memos are attachments on the same space.
 The host, not the model, decides which inbound messages become
 `DroidVoiceGateway.request_start`, `request_abort`, or a status snapshot.
 Queued start is never takeoff. Spacebar remains the fast emergency stop.
-The standalone TypeScript agent currently proves connectivity with an echo;
-mission mapping belongs on the Python host next to `PhotonNotifier`.
+The TypeScript agent in `photon-imessage-agent` is the Photon inbound
+bridge: authorized text is POSTed to loopback ingest (`DROID_COMMAND_URL`,
+default `http://127.0.0.1:8766/operator-command`) and mapped onto Droid.
+Run `bun start` there next to `demo.py` / `voice_mission`. It does not fly
+by itself; queued start is not takeoff.
 
 Field PCM from the UNO Q (`sensor_recv` `/mic`) is **data**, not activation.
 See [VOICE_CHAIN_SPEC.md](VOICE_CHAIN_SPEC.md).
@@ -162,8 +165,8 @@ bubble. Acceptance is not delivery. The in-memory queue is best effort and
 process exit may leave sends pending. The client also supports image uploads;
 crop analysis on the data chain sends the captured JPEG with the weather
 insight. Operator activation uses the same space inbound (phone → Photon →
-Droid). The standalone TypeScript messaging agent is a connectivity echo,
-not the mission mapper. Configured mock missions still send real outbound
+Droid). The TypeScript agent is the inbound bridge to that ingest, not a
+connectivity echo. Configured mock missions still send real outbound
 messages unless `--no-photon`.
 
 ## SDK isolation, features and storage

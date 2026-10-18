@@ -43,3 +43,42 @@ class OperatorHttpTest(unittest.TestCase):
         body = self.post({"text": "  "})
         self.assertFalse(body["ok"])
         self.assertEqual(body["reason"], "empty")
+
+    def test_status_summarizes_snapshot(self):
+        body = self.post({"text": "what's the status"})
+        self.assertEqual(body["intent"], "status")
+        self.assertTrue(body["ok"])
+        self.assertIn("idle", (body.get("message") or "").lower())
+
+    def test_text_user_without_sink_is_not_queued(self):
+        body = self.post({"text": "text the user hello"})
+        self.assertFalse(body["ok"])
+        message = (body.get("message") or "").lower()
+        self.assertTrue("no_text_user" in message or "rejected" in message)
+        self.assertNotIn("queued", message)
+        self.assertEqual(body.get("reason"), "no_text_user")
+
+
+class RejectedStartHttpTest(unittest.TestCase):
+    def setUp(self):
+        class RejectStart:
+            def request_start(self):
+                return {"ok": False, "status": "rejected"}
+
+        self.server = OperatorCommandServer(RejectStart(), port=18767)
+        self.server.start()
+        self.url = "http://127.0.0.1:18767/operator-command"
+
+    def tearDown(self):
+        self.server.close()
+
+    def test_rejected_start_does_not_say_queued(self):
+        req = urllib.request.Request(
+            self.url, data=json.dumps({"text": "survey the wheat"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            body = json.loads(resp.read().decode())
+        self.assertEqual(body["intent"], "start_survey")
+        self.assertFalse(body["ok"])
+        self.assertNotIn("queued", (body.get("message") or "").lower())

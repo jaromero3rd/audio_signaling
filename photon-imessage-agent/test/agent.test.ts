@@ -43,7 +43,7 @@ describe("iMessage echo handler", () => {
     expect(reply.body.spaceId).toBe(event.data.object.space.id);
     expect(reply.body.senderId).toBe(event.data.object.receivedBy.id);
     expect(reply.body.parentMessageId).toBeUndefined();
-    expect(reply.headers["idempotency-key"]).toBe(`photon-echo-v2:${event.data.object.id}`);
+    expect(reply.headers["idempotency-key"]).toBe(`photon-droid-cmd-v1:${event.data.object.id}`);
     expect(reply.body.content).toEqual({
       type: "text", format: "plain", text: "Queued for Droid: Hello Photon",
     });
@@ -103,16 +103,46 @@ describe("iMessage echo handler", () => {
     expect(testAnswer("blah blah keyword pi")).toBe("3.14159");
   });
   test("extracts a voice attachment id for Scribe", () => {
-    const event = inbound();
-    event.data.object.content = {
-      type: "attachment",
+    const voice = inbound();
+    voice.data.object.content = {
+      type: "voice",
       attachmentId: `pho_att_${"0".repeat(26)}`,
     };
-    expect(replyFor(event, config)).toBeUndefined();
-    expect(audioRefFor(event, config)).toEqual({
-      messageId: event.data.object.id,
+    expect(audioRefFor(voice, config)).toEqual({
+      messageId: voice.data.object.id,
       attachmentId: `pho_att_${"0".repeat(26)}`,
     });
+    const audioFile = inbound();
+    audioFile.data.object.content = {
+      type: "attachment",
+      attachmentId: `pho_att_${"1".repeat(26)}`,
+      filename: "memo.m4a",
+      mime: "audio/mp4",
+    };
+    expect(audioRefFor(audioFile, config)).toEqual({
+      messageId: audioFile.data.object.id,
+      attachmentId: `pho_att_${"1".repeat(26)}`,
+    });
+    const photo = inbound();
+    photo.data.object.content = {
+      type: "attachment",
+      attachmentId: `pho_att_${"2".repeat(26)}`,
+      filename: "field.jpg",
+      mime: "image/jpeg",
+    };
+    expect(replyFor(photo, config)).toBeUndefined();
+    expect(audioRefFor(photo, config)).toBeUndefined();
+  });
+  test("ignores jpeg and png attachments", () => {
+    for (const content of [
+      { type: "attachment", attachmentId: `pho_att_${"3".repeat(26)}`, filename: "crop.jpeg", contentType: "image/jpeg" },
+      { type: "attachment", attachmentId: `pho_att_${"4".repeat(26)}`, filename: "crop.png", mime: "image/png" },
+    ]) {
+      const event = inbound();
+      event.data.object.content = content;
+      expect(audioRefFor(event, config)).toBeUndefined();
+      expect(replyFor(event, config)).toBeUndefined();
+    }
   });
   test("ignores missing receiving-agent data", () => {
     const event = inbound();

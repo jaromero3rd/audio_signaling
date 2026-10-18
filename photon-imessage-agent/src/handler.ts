@@ -92,12 +92,22 @@ export function operatorReply(droidMessage: string): string {
   return text || "Droid did not return a message.";
 }
 
+const AUDIO_NAME = /\.(m4a|caf|mp3|wav|aac|ogg|mp4)$/i;
+
+function isAudioAttachment(content: Record<string, unknown>): boolean {
+  const mime = String(content.mime ?? content.contentType ?? content.mimeType ?? "").toLowerCase();
+  if (mime.startsWith("audio/")) return true;
+  const filename = String(content.filename ?? content.name ?? content.fileName ?? "");
+  return AUDIO_NAME.test(filename);
+}
+
 export function audioRefFor(event: unknown, config: Config): { messageId: string; attachmentId: string } | undefined {
   const inbound = inboundMessage(event, config);
   if (!inbound) return;
   const { message, content } = inbound;
-  if (content.type !== "attachment" && content.type !== "voice") return;
   if (typeof content.attachmentId !== "string" || !content.attachmentId) return;
+  if (content.type === "voice") return { messageId: message.id as string, attachmentId: content.attachmentId };
+  if (content.type !== "attachment" || !isAudioAttachment(content)) return;
   return { messageId: message.id as string, attachmentId: content.attachmentId };
 }
 
@@ -110,7 +120,7 @@ export function commandReplyFor(
   const inbound = inboundMessage(event, config);
   if (!inbound) return;
   const { message, space, agent } = inbound;
-  const key = kind === "voice" ? `photon-voice-v1:${message.id}` : `photon-echo-v2:${message.id}`;
+  const key = kind === "voice" ? `photon-voice-v1:${message.id}` : `photon-droid-cmd-v1:${message.id}`;
   return {
     path: { id: config.project },
     headers: { "idempotency-key": key },

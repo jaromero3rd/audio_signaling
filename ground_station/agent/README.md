@@ -105,7 +105,8 @@ audio attachment, not telephony and not a guaranteed native voice-message UI.
 The queue is best effort, not durable. Accepted never means delivered.
 Photo upload is supported at the client boundary. Crop-analysis JPEGs travel
 on the data chain outbound. Operator activation uses the same space inbound
-(phone → Photon → Droid). The TypeScript echo agent is connectivity only.
+(phone → Photon → Droid). The TypeScript agent is that inbound bridge, not a
+connectivity echo.
 
 ## Verification
 

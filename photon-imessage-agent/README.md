@@ -1,23 +1,24 @@
-# AgriDrone iMessage connection test
+# AgriDrone Photon inbound bridge
 
 This is a **Photon 2.0 Beta** agent, not the legacy `spectrum-ts` product.
 It uses `@photon-ai/api` and the beta Socket.IO event stream. The legacy
 Photon CLI and `create-spectrum-project` do not configure beta projects.
 
-The mission command chain is: operator voice on the phone → this iMessage
-space → Photon inbound → Python host → Droid. This TypeScript process is a
-connectivity echo, not the Droid mapper. The data stream (survey JPEG, status
-text, voice notes) uses the same space outbound from Python `photon.py`.
+This process is the Photon inbound bridge: authorized iMessage text/dictation
+on the configured direct space is POSTed to the laptop loopback ingest
+(`DROID_COMMAND_URL`, default `http://127.0.0.1:8766/operator-command`),
+mapped with `map_intent`, and handed to Droid. It does not fly by itself.
+Queued `start_survey` is not takeoff; local `y` on the laptop still approves
+real hardware. The data stream (survey JPEG, status text, voice notes) uses
+the same space outbound from Python `photon.py`.
 
-Only iMessage is handled. Authorized plain text or a voice memo is transcribed
-with ElevenLabs Scribe. This test replies with the transcript and, if you ask
-`what's two plus two` or say `pi`, the answer. It does not activate the drone.
+Only iMessage is handled. iPhone dictation arrives as plain text. Voice memos
+are transcribed with ElevenLabs Scribe only if Photon delivers audio on this
+assignment (often it does not). Photos and other non-audio attachments are
+ignored. Replies are ingest results from the host, not parroted inbound text.
 
-```text
-Heard: what's two plus two
-Answer: 4
-Test only. Drone not activated.
-```
+Run `bun start` from this directory next to `python demo.py --mock` (or
+`--no-voice`) / `voice_mission` so ingest on `127.0.0.1:8766` is up.
 
 ## Local commands
 
@@ -48,10 +49,10 @@ registered in Photon, not an Apple-account email or SMS.
 ## Safety and recovery
 
 - Only the configured human sender, agent, project, and direct iMessage
-  conversations can trigger replies. Other channels and outbound events
-  cannot trigger an echo loop.
+  conversations can trigger ingest. Other channels and outbound events
+  cannot trigger a command loop.
 - Logs do not include keys, phone numbers, or inbound message text. Replies
-  deliberately echo text back into the same authorized conversation.
+  are ingest results, not parrot echoes.
 - Replies use the incoming Space ID, receiving agent User ID, and message ID.
   A stable idempotency key protects against duplicate sends during replay.
 - Sends omit `parentMessageId`: this shared iMessage Space rejects threaded
