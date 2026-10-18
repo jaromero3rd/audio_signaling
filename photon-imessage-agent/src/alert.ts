@@ -3,6 +3,7 @@
  * configured direct iMessage space.
  *
  *   bun run src/alert.ts --text "health 0.35" [--image captures/photo.jpg]
+ *                        [--audio summary.mp3]
  *                        [--space <spaceId> --agent <agentUserId>]
  *
  * Space context (spaceId + agent User ID) is saved by the agent's checkpoint
@@ -19,6 +20,7 @@ import { record } from "./handler";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+  ".mp3": "audio/mpeg", ".wav": "audio/wav",
 };
 
 function arg(flag: string): string | undefined {
@@ -31,7 +33,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 async function upload(photon: Photon, projectId: string, imagePath: string): Promise<string> {
   const bytes = readFileSync(imagePath);
   const contentType = CONTENT_TYPES[extname(imagePath).toLowerCase()];
-  if (!contentType) throw new SetupError(`Unsupported image type for ${imagePath}; use jpeg/png/webp.`);
+  if (!contentType) throw new SetupError(`Unsupported attachment type for ${imagePath}; use jpeg/png/webp/mp3/wav.`);
   const meta = JSON.stringify({
     contentType, sizeBytes: bytes.length, filename: basename(imagePath),
   });
@@ -74,10 +76,31 @@ type SendMessageBody =
   | { type: "text"; format: string; text: string }
   | { type: "attachment"; attachmentId: string };
 
+async function sendAttachment(photon: Photon, projectId: string, spaceId: string, agentId: string,
+                              filePath: string, idemPrefix: string) {
+  const attachmentId = await upload(photon, projectId, filePath);
+  let sent: string | undefined;
+  for (let attempt = 0; attempt < 8 && !sent; attempt++) {
+    try {
+      sent = await send(photon, projectId, spaceId, agentId,
+        { type: "attachment", attachmentId }, `${idemPrefix}:${attachmentId}`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409 && record(error.body).code === "ATTACHMENT_NOT_READY") {
+        await sleep(5_000);
+        continue;
+      }
+      throw error;
+    }
+  }
+  if (!sent) throw new SetupError(`Attachment ${attachmentId} never became ready.`);
+  return sent;
+}
+
 async function main() {
   const text = arg("--text");
   const image = arg("--image");
-  if (!text && !image) throw new SetupError("Pass --text and/or --image.");
+  const audio = arg("--audio");
+  if (!text && !image && !audio) throw new SetupError("Pass --text, --image, and/or --audio.");
 
   const config = configuration();
   const saved = spaceContext(config).read();
@@ -95,25 +118,15 @@ async function main() {
   });
 
   const stamp = Date.now().toString(36);
+  // Attachments are processed asynchronously; sendMessage rejects an
+  // unprocessed one with 409 ATTACHMENT_NOT_READY (Retry-After: 5).
   if (image) {
-    const attachmentId = await upload(photon, config.project, image);
-    // Attachments are processed asynchronously; sendMessage rejects an
-    // unprocessed one with 409 ATTACHMENT_NOT_READY (Retry-After: 5).
-    let sentImage: string | undefined;
-    for (let attempt = 0; attempt < 8 && !sentImage; attempt++) {
-      try {
-        sentImage = await send(photon, config.project, spaceId, agentId,
-          { type: "attachment", attachmentId }, `agridrone-img:${attachmentId}`);
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 409 && record(error.body).code === "ATTACHMENT_NOT_READY") {
-          await sleep(5_000);
-          continue;
-        }
-        throw error;
-      }
-    }
-    if (!sentImage) throw new SetupError(`Attachment ${attachmentId} never became ready.`);
+    const sentImage = await sendAttachment(photon, config.project, spaceId, agentId, image, "agridrone-img");
     console.info(`Image alert accepted: ${sentImage}`);
+  }
+  if (audio) {
+    const sentAudio = await sendAttachment(photon, config.project, spaceId, agentId, audio, "agridrone-aud");
+    console.info(`Audio alert accepted: ${sentAudio}`);
   }
   if (text) {
     const sentText = await send(photon, config.project, spaceId, agentId,

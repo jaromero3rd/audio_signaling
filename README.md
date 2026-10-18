@@ -35,6 +35,9 @@ Operator → ElevenAgents client tool → DroidVoiceGateway → persistent Droid
 Default mode does not upload photos: Droid handles high-level requests while
 AprilTag/YOLO steer locally. `--crop-analysis` enables the image turn and a
 fixed 90-second hover deadline. Reimages do not renew that deadline.
+After accepting the Droid score, crop analysis joins it with live NOAA/NASA
+weather through Chalk, stores the joined record when `CHALK_CLIENT_ID` is set,
+and sends the insight, JPEG, and an ElevenLabs clip through Photon.
 Invalid JSON, a failed model turn, or narration without a decision stops the
 mission and requests landing. Emergency stop bypasses cloud latency.
 
@@ -93,8 +96,9 @@ ElevenLabs transports and no hardware. It is not part of fake-only validation.
 - Voice notes: in-memory MP3, Flash v2.5, at most 3,500 text characters / 5 MiB.
   Missing or failed TTS does not prevent the independent text attempt.
 - Notifications are best effort, not a durable outbox. Accepted is not delivered.
-- Photon upload supports image attachments; the mission currently sends status
-  text and analysis text/audio, not captured photos or incoming mission commands.
+- Photon upload supports image attachments; crop analysis sends its captured
+  JPEG with the weather insight and audio clip. Incoming mission commands are
+  not wired.
 
 See the [runtime guide](ground_station/agent/README.md), [technical guide](README_TECHNICAL.md),
 and [requirements](prd.md). Local history is `data/surveys.sqlite3`; optional
