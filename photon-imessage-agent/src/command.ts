@@ -68,7 +68,7 @@ export function commandForwarder(
         if (command === "start") {
           return payload.duplicate
             ? "Start request already received; takeoff is not confirmed."
-            : "Start queued for Droid; camera/battery checks still apply. Takeoff is not confirmed.";
+            : "Start armed. Laptop will join the Tello, then preflight/takeoff. Takeoff is not confirmed yet.";
         }
         return "Stop latched on the mission laptop; landing is requested, not confirmed.";
       } catch {

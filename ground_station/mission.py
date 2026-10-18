@@ -12,7 +12,7 @@ from ground_station.apriltag import AprilTagDetector
 from ground_station.control import tag_width_frac, width_frac_for_distance, yaw_forward
 from ground_station.vision import DEFAULT_WEIGHTS, Box, union_boxes, wheat_size_ratio
 
-SEARCH_YAW = 22
+SEARCH_YAW = 16
 SEARCH_TIMEOUT_S = 60.0
 SEARCH_HOME_TIMEOUT_S = 60.0
 TARGET_LOST_FRAMES = 12
@@ -22,41 +22,56 @@ MIN_APPROACH_S = 1.2
 DWELL_S = 0.6
 FRAME_STALE_S = 0.5
 ANALYSIS_HOLD_S = 90.0
-TURN_HOME_S = 3.5
-TURN_HOME_MAX_S = 6.0
-TURN_YAW = 55
+TURN_HOME_S = 8.0
+TURN_HOME_MAX_S = 14.0
+# After photo: faster spin to clear the poster/tag before hunting home.
+TURN_YAW = 28
 TARGET_GONE_WIDTH = 0.08
-# One full yaw at SCAN_YAW ≈ 360° (~50 deg/s at 50). Then climb and spin again.
-SCAN_YAW = 50
-SCAN_360_S = 8.0
+# Once locked on the first tag, yaw toward it more slowly than open search.
+APPROACH_MAX_YAW = 14
+APPROACH_KP_YAW_SCALE = 0.45
+# Approach poster/crop faster; return-home keeps baseline Gains fwd.
+APPROACH_FWD_SCALE = 1.25
+# Open scan / search_home: gentler yaw (lag-friendly).
+SCAN_YAW = 19
+SCAN_360_S = 12.0
 SCAN_CLIMB_S = 1.2
-SCAN_UP = 22
+SCAN_UP = 18
+SEARCH_HOME_YAW = SCAN_YAW
+# approach_home: soft yaw + center tag before creeping (e2b lag → less swerve).
+HOME_APPROACH_MAX_YAW = 12
+HOME_APPROACH_KP_YAW_SCALE = 0.40
+HOME_CENTER_GATE = 0.10
 HOME_LOST_FRAMES = 12
-CLOSE_FEET_DEFAULT = 2.0
+# Stop / turn sooner: farther from AprilTags (~3.5 ft for 20 cm print).
+CLOSE_FEET_DEFAULT = 3.5
+CRUISE_HEIGHT_FT = 4.5
 TAG_SIZE_M_DEFAULT = 0.20
-# Second tag-12 (base): land once tag fills this much of frame (~0.5–0.7 m for 20 cm print).
-HOME_LAND_WIDTH = 0.20
+# Home tag: land when tag is ~12% of frame width (farther than before).
+HOME_LAND_WIDTH = 0.12
 # AprilTags often drop when too close / clipped — still land if already this close.
 HOME_LOST_GRACE_S = 1.0
+# Poster / wheat: photo + turn when box width is this fraction of the frame.
+WHEAT_CLOSE_FRAC_DEFAULT = 0.30
 
 
 @dataclass
 class Gains:
-    kp_yaw: float = 90.0
-    kp_fwd: float = 80.0
-    kp_up: float = 120.0
-    kp_lr: float = 110.0
-    max_yaw: int = 35
-    max_fwd: int = 20
-    max_up: int = 20
-    max_lr: int = 30
+    kp_yaw: float = 70.0
+    kp_fwd: float = 55.0
+    kp_up: float = 90.0
+    kp_lr: float = 80.0
+    max_yaw: int = 22
+    max_fwd: int = 12
+    max_up: int = 15
+    max_lr: int = 18
     lr_trim: int = 0
     invert_yaw: bool = False
     invert_lr: bool = False
     deadband: float = 0.08
     arrival_deadband: float = 0.22
     target_area: float = 0.12
-    wheat_close_frac: float = 0.015
+    wheat_close_frac: float = WHEAT_CLOSE_FRAC_DEFAULT
     tag_size_m: float = TAG_SIZE_M_DEFAULT
     close_m: float = CLOSE_FEET_DEFAULT * 0.3048
 
@@ -67,7 +82,7 @@ class Tick:
     fwd: int = 0
     up: int = 0
     lr: int = 0
-    action: str | None = None  # takeoff | land | photo | None
+    action: str | None = None  # takeoff | land | flip_land | photo | None
     box: Box | None = None
     err_x: float | None = None
     area: float | None = None
@@ -76,32 +91,15 @@ class Tick:
     stale: bool = False
 
 
-def _make_target_detector(kind: str, family: str, target_tag: int | None, weights: Path):
-    if kind == "wheat":
-        import os
-
-        from ground_station.vision import HsvWheatDetector, YoloWheatHeadDetector
-
-        # Factory e2b (or any) ONNX server — set by scripts/wheat_e2b_up.sh
-        remote = os.environ.get("WHEAT_INFER_URL", "").strip()
-        if remote:
-            from ground_station.remote_wheat import RemoteWheatHeadDetector
-
-            return RemoteWheatHeadDetector(url=remote)
-        if weights.is_file():
-            return YoloWheatHeadDetector(weights=weights)
-        print(f"no {weights}; wheat target: HSV color detector (computer test)")
-        return HsvWheatDetector()
-    return AprilTagDetector(family=family, tag_id=target_tag)
-
-
-def resolve_target(kind: str, family: str, target_tag: int | None, weights: Path):
+def resolve_target_kind(kind: str, weights: Path) -> str:
     if kind == "auto":
         kind = "wheat" if weights.is_file() else "tag"
         if kind == "tag":
-            print("wheat weights missing; --target auto → AprilTag. Use --target wheat for a webcam wheat test.")
-    detector = _make_target_detector(kind, family, target_tag, weights)
-    return kind, detector
+            print(
+                "wheat weights missing; --target auto → AprilTag. "
+                "Use --target wheat for a webcam wheat test."
+            )
+    return kind
 
 
 class SurveyMission:
@@ -118,13 +116,47 @@ class SurveyMission:
         weights: Path = DEFAULT_WEIGHTS,
         on_phase: Callable[[str, str], None] | None = None,
         analysis_required: bool = False,
+        local_vision: bool = False,
+        wheat_infer_url: str | None = None,
     ) -> None:
         self.gains = gains
         self.home_tag = home_tag
-        self.target_kind, self.target_det = resolve_target(
-            target_kind, family, target_tag, weights
-        )
-        self.home_det = AprilTagDetector(family=family, tag_id=home_tag)
+        self.target_kind = resolve_target_kind(target_kind, weights)
+        wheat_label = "wheat_poster" if "poster" in Path(weights).stem.lower() else "wheat_head"
+        self._vision = None
+        if local_vision:
+            print("WARNING: --local-vision: ONNX + AprilTag on this laptop (not Factory)")
+            if self.target_kind == "wheat":
+                from ground_station.vision import HsvWheatDetector, YoloWheatHeadDetector
+
+                if weights.is_file():
+                    self.target_det = YoloWheatHeadDetector(weights=weights)
+                else:
+                    print(f"no {weights}; wheat target: HSV color detector (computer test)")
+                    self.target_det = HsvWheatDetector()
+            else:
+                self.target_det = AprilTagDetector(family=family, tag_id=target_tag)
+            self.home_det = AprilTagDetector(family=family, tag_id=home_tag)
+        else:
+            from ground_station.remote_vision import (
+                RemoteAprilTagViaVision,
+                RemoteVisionClient,
+                RemoteWheatViaVision,
+            )
+
+            self._vision = RemoteVisionClient(
+                wheat_infer_url,
+                family=family,
+                home_tag=home_tag,
+                target_tag=target_tag if self.target_kind == "tag" else None,
+                wheat=self.target_kind == "wheat",
+                wheat_label=wheat_label,
+            )
+            if self.target_kind == "wheat":
+                self.target_det = RemoteWheatViaVision(self._vision)
+            else:
+                self.target_det = RemoteAprilTagViaVision(self._vision, role="target")
+            self.home_det = RemoteAprilTagViaVision(self._vision, role="home")
         self.same_mark = self.target_kind == "tag" and target_tag == home_tag
         self.on_phase = on_phase
         self.analysis_required = analysis_required
@@ -141,6 +173,7 @@ class SurveyMission:
         self._takeoff_sent = False
         self._land_sent = False
         self._photo_sent = False
+        self._flip_before_land = False
         self._home_miss = 0
         self._last_home_box: Box | None = None
         self._home_best_width = 0.0
@@ -171,6 +204,7 @@ class SurveyMission:
             self._takeoff_sent = False
             self._land_sent = False
             self._photo_sent = False
+            self._flip_before_land = False
             self._dwell_t = None
             self._home_miss = 0
             self._last_home_box = None
@@ -191,18 +225,29 @@ class SurveyMission:
             self.last_photo = str(path) if path else None
 
     def analysis_waiting(self) -> bool:
+        """Crop LLM may still be running; does NOT gate YOLO flight RC."""
         with self._lock:
             return (
-                self.phase == "await_analysis" and self._analysis_deadline is not None
+                self.analysis_required
+                and self._analysis_deadline is not None
                 and time.time() < self._analysis_deadline
             )
 
-    def continue_survey(self) -> dict[str, Any]:
+    def clear_analysis_hold(self) -> None:
         with self._lock:
-            if not self.analysis_waiting():
-                return {"ok": False, "reason": "no_live_analysis_hold"}
-            self._set_phase_locked("turn_home")
-            return {"ok": True, "phase": self.phase}
+            self._analysis_deadline = None
+
+    def continue_survey(self) -> dict[str, Any]:
+        """Legacy tool: host already returns home after the survey photo."""
+        with self._lock:
+            if self.phase == "await_analysis":
+                self._set_phase_locked("turn_home")
+                return {"ok": True, "phase": self.phase}
+            if self.analysis_waiting() or self.phase in (
+                "turn_home", "search_home", "approach_home", "land", "done",
+            ):
+                return {"ok": True, "phase": self.phase, "status": "flight_already_returning"}
+            return {"ok": False, "reason": "no_live_analysis_hold"}
 
     def _set_phase_locked(self, phase: str) -> None:
         if phase == self.phase:
@@ -307,18 +352,14 @@ class SurveyMission:
                     action = "photo"
                     self._photo_sent = True
                     if self.analysis_required:
+                        # Arm crop-LLM/Chalk/Photon in parallel; YOLO still flies home.
                         self._analysis_deadline = now + ANALYSIS_HOLD_S
-                        self._set_phase_locked("await_analysis")
                 elif elapsed > 0.4:
                     self._set_phase_locked("turn_home")
 
             elif phase == "await_analysis":
-                # Zero RC while cloud work runs. Reimages never renew this deadline.
-                if self._analysis_deadline is None or now >= self._analysis_deadline:
-                    self._set_phase_locked("abort")
-                    action = "land"
-                    self._land_sent = True
-                    self.flying = False
+                # Legacy hold only. New path never enters here — return home instead of abort.
+                self._set_phase_locked("turn_home")
 
             elif phase == "turn_home":
                 # Spin in place. Do not lock onto tag 12 while it is still the target in view.
@@ -351,11 +392,13 @@ class SurveyMission:
                             self._home_close_seen_t = now
                     if self._reached_home(home_box, frame.shape, elapsed, now):
                         print(
-                            f"home tag close enough (w={w:.2f} need≈{self._need_width(frame.shape):.2f}) — landing"
+                            f"home tag close enough (w={w:.2f} need≈{self._need_width(frame.shape):.2f}) — flip then land"
                         )
+                        self._flip_before_land = True
                         self._set_phase_locked("land")
                     elif elapsed > HOME_APPROACH_TIMEOUT_S:
                         print("home approach timeout — landing")
+                        self._flip_before_land = False
                         self._set_phase_locked("land")
                     if now - self._dbg_t > 0.8 and self.phase == "approach_home":
                         need = max(0.9 * self._need_width(frame.shape), HOME_LAND_WIDTH)
@@ -385,10 +428,10 @@ class SurveyMission:
 
             elif phase == "land":
                 if not self._land_sent:
-                    action = "land"
+                    action = "flip_land" if self._flip_before_land else "land"
                     self._land_sent = True
                     self.flying = False
-                elif elapsed > 1.0:
+                elif elapsed > (3.5 if self._flip_before_land else 1.0):
                     self._set_phase_locked("done")
 
             elif phase == "abort":
@@ -408,36 +451,67 @@ class SurveyMission:
                 "search_target",
                 "approach_target",
             )
-            track_w = None if on_wheat else need_w
+            # Wheat/poster uses frame-width fraction; AprilTag uses range-based need_w.
+            track_w = g.wheat_close_frac if on_wheat else need_w
+
             if box is not None and frame is not None and seeking:
+                # Soft yaw once locked; home centers first then creeps (lag-safe).
+                home_lock = phase == "approach_home"
+                kp_fwd = g.kp_fwd
+                max_fwd = g.max_fwd
+                if home_lock:
+                    kp_yaw = g.kp_yaw * HOME_APPROACH_KP_YAW_SCALE
+                    max_yaw = min(g.max_yaw, HOME_APPROACH_MAX_YAW)
+                    fwd_gate = HOME_CENTER_GATE
+                    center_first = True
+                elif phase == "approach_target":
+                    kp_yaw = g.kp_yaw * APPROACH_KP_YAW_SCALE
+                    max_yaw = min(g.max_yaw, APPROACH_MAX_YAW)
+                    fwd_gate = 0.18
+                    center_first = False
+                    kp_fwd = g.kp_fwd * APPROACH_FWD_SCALE
+                    max_fwd = int(round(g.max_fwd * APPROACH_FWD_SCALE))
+                else:
+                    kp_yaw = g.kp_yaw
+                    max_yaw = g.max_yaw
+                    fwd_gate = 0.18
+                    center_first = False
                 rc = yaw_forward(
                     box,
                     frame.shape,
-                    kp_yaw=g.kp_yaw,
-                    kp_fwd=g.kp_fwd,
-                    max_yaw=g.max_yaw,
-                    max_fwd=g.max_fwd,
+                    kp_yaw=kp_yaw,
+                    kp_fwd=kp_fwd,
+                    max_yaw=max_yaw,
+                    max_fwd=max_fwd,
                     deadband=g.deadband,
-                    target_area=g.wheat_close_frac if on_wheat else g.target_area,
+                    target_area=g.target_area,
                     kp_up=g.kp_up,
                     max_up=g.max_up,
                     target_width=track_w,
-                    size_ratio=wheat_ratio if on_wheat else None,
+                    size_ratio=None,
                     kp_lr=g.kp_lr,
                     max_lr=g.max_lr,
                     lr_trim=g.lr_trim,
                     invert_yaw=g.invert_yaw,
                     invert_lr=g.invert_lr,
+                    forward_gate=fwd_gate,
+                    center_before_fwd=center_first,
                 )
                 yaw, fwd, up, lr, err_x, area = rc
             elif seeking and box is None and self.flying:
                 if phase in ("search_target", "search_home"):
-                    yaw, up, fwd = self._scout(elapsed, g.invert_yaw)
+                    scout_yaw = SEARCH_HOME_YAW if phase == "search_home" else SCAN_YAW
+                    yaw, up, fwd = self._scout(elapsed, g.invert_yaw, yaw_rate=scout_yaw)
                 else:
                     yaw = SEARCH_YAW
 
             if on_wheat:
-                width, need_hud = wheat_ratio, g.wheat_close_frac
+                width = (
+                    tag_width_frac(box, frame.shape)
+                    if box is not None and frame is not None
+                    else None
+                )
+                need_hud = g.wheat_close_frac
             else:
                 width = (
                     tag_width_frac(box, frame.shape)
@@ -463,17 +537,18 @@ class SurveyMission:
         return width_frac_for_distance(self.gains.tag_size_m, self.gains.close_m, shape)
 
     def _close_enough(self, box: Box, shape, wheat_ratio: float = 0.0) -> bool:
-        """Wheat: typical head box / image. AprilTag: width in frame (~2 ft)."""
+        """Wheat/poster: box width / frame. AprilTag: width ≈ close_m away."""
         g = self.gains
         err_x = (box.cx / shape[1]) - 0.5
         if self.target_kind == "wheat" and self.phase == "approach_target":
-            return wheat_ratio >= g.wheat_close_frac and abs(err_x) <= g.arrival_deadband
+            width = tag_width_frac(box, shape)
+            return width >= g.wheat_close_frac and abs(err_x) <= g.arrival_deadband
         width = tag_width_frac(box, shape)
         need = self._need_width(shape)
         return width >= (0.9 * need) and abs(err_x) <= g.arrival_deadband
 
     def _home_close_enough(self, box: Box, shape) -> bool:
-        """Base / second ID-12: FOV range estimate or absolute width floor."""
+        """Base / second ID-12: stop farther out (smaller on-screen width)."""
         g = self.gains
         width = tag_width_frac(box, shape)
         need = max(0.9 * self._need_width(shape), HOME_LAND_WIDTH)
@@ -507,14 +582,16 @@ class SurveyMission:
             return False
         return now - self._dwell_t >= DWELL_S
 
-    def _scout(self, elapsed: float, invert_yaw: bool) -> tuple[int, int, int]:
+    def _scout(
+        self, elapsed: float, invert_yaw: bool, *, yaw_rate: int = SCAN_YAW
+    ) -> tuple[int, int, int]:
         """Yaw a full 360 in place; if still unseen, climb and spin again."""
         cycle = SCAN_360_S + SCAN_CLIMB_S
         t = elapsed % cycle
         n = int(elapsed / cycle)
         sign = -1 if invert_yaw else 1
         if t < SCAN_360_S:
-            return SCAN_YAW * sign, 0, 0
+            return yaw_rate * sign, 0, 0
         if n != self._scan_n:
             self._scan_n = n
             print(f"scan {n + 1} complete — climbing, then spinning again")

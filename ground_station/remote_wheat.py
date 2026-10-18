@@ -1,7 +1,8 @@
-"""Wheat-head detector that calls a remote ONNX server (Factory e2b)."""
+"""Wheat/poster detector via Factory e2b ONNX server (not laptop)."""
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -14,15 +15,27 @@ from ground_station.vision import Box, union_boxes
 
 
 class RemoteWheatHeadDetector:
-    """POST JPEG frames to WHEAT_INFER_URL (default http://127.0.0.1:8767/detect)."""
+    """POST JPEG frames to WHEAT_INFER_URL (default http://127.0.0.1:8767/detect).
 
-    def __init__(self, url: str | None = None, conf: float = 0.25, timeout: float = 2.5):
-        self.url = (url or os.environ.get("WHEAT_INFER_URL") or "http://127.0.0.1:8767/detect").rstrip("/")
+    Run `scripts/wheat_e2b_up.sh` so inference lives on the Droid Computer.
+    """
+
+    def __init__(
+        self,
+        url: str | None = None,
+        conf: float = 0.25,
+        timeout: float = 3.5,
+        label: str = "wheat_head",
+    ):
+        self.url = (url or os.environ.get("WHEAT_INFER_URL") or "http://127.0.0.1:8767/detect").rstrip(
+            "/"
+        )
         if not self.url.endswith("/detect"):
             self.url = self.url + "/detect"
         self.conf = conf
         self.timeout = timeout
-        print(f"wheat detector: REMOTE {self.url}")
+        self.label = label
+        print(f"wheat detector: DROID/e2b REMOTE {self.url} label={label}")
 
     def detect_all(self, frame_bgr: np.ndarray) -> list[Box]:
         ok, buf = cv2.imencode(".jpg", frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
@@ -36,7 +49,7 @@ class RemoteWheatHeadDetector:
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                payload: dict[str, Any] = __import__("json").loads(resp.read().decode())
+                payload: dict[str, Any] = json.loads(resp.read().decode())
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as exc:
             print(f"remote wheat miss: {exc}")
             return []
@@ -45,7 +58,16 @@ class RemoteWheatHeadDetector:
             if len(row) < 5 or float(row[4]) < self.conf:
                 continue
             x, y, w, h, conf = row[:5]
-            out.append(Box(x=int(x), y=int(y), w=int(w), h=int(h), conf=float(conf), label="wheat_head"))
+            out.append(
+                Box(
+                    x=int(x),
+                    y=int(y),
+                    w=int(w),
+                    h=int(h),
+                    conf=float(conf),
+                    label=self.label,
+                )
+            )
         return out
 
     def detect(self, frame_bgr: np.ndarray) -> Box | None:

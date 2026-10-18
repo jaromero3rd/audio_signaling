@@ -63,7 +63,16 @@ class PhoneCommandGateway:
             raise
         if not queued.get("ok"):
             self.driver.cancel_phone_start()
-        return queued
+            return queued
+        # Park start_survey now so the camera loop can consume phone auth after
+        # preflight — do not wait for the model turn (and never require local y).
+        parked = self.driver.issue(self.driver.drone_id, "start_survey")
+        return {
+            **queued,
+            "ok": True,
+            "status": queued.get("status", "queued_for_droid"),
+            "pending": parked.get("reason") or parked.get("status"),
+        }
 
     def request_abort(self):
         return self.gateway.request_abort()
@@ -122,7 +131,7 @@ class PhoneCommandBridge:
                 status, payload = 200, {
                     "ok": bool(result.get("ok")), "executed": False,
                     "status": result.get("status", "requested"),
-                    "message": ("Start queued for Droid; camera/battery checks still apply."
+                    "message": ("Start armed; laptop will join Tello then preflight/takeoff (no local y)."
                                 if command == "start" and result.get("ok") else
                                 "Start rejected." if command == "start" else
                                 "Stop latched on the mission laptop; landing is requested, not confirmed."

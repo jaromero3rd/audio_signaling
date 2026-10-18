@@ -28,17 +28,30 @@ from ground_station.mission import ANALYSIS_HOLD_S, Gains, SurveyMission
 def mission():
     with patch("ground_station.mission.AprilTagDetector") as detector:
         detector.return_value.detect.return_value = None
-        return SurveyMission(target_kind="tag", family="36h11", target_tag=12,
-                             home_tag=12, gains=Gains(), analysis_required=True)
+        return SurveyMission(
+            target_kind="tag",
+            family="36h11",
+            target_tag=12,
+            home_tag=12,
+            gains=Gains(),
+            analysis_required=True,
+            local_vision=True,
+        )
 
 
 def capture_phase(value):
     with value._lock:
         value.flying = True
         value._set_phase_locked("survey")
-    tick = value.tick(np.zeros((100, 100, 3), dtype=np.uint8), time.time())
+    now = time.time()
+    tick = value.tick(np.zeros((100, 100, 3), dtype=np.uint8), now)
     assert tick.action == "photo"
-    assert value.snapshot()["phase"] == "await_analysis"
+    assert value.analysis_waiting()
+    # Photo arms crop-LLM hold; YOLO flight continues home without await_analysis.
+    value._phase_t = now - 1.0
+    value.tick(np.zeros((100, 100, 3), dtype=np.uint8), now)
+    assert value.snapshot()["phase"] == "turn_home"
+    assert value.analysis_waiting()
 
 
 class DecisionStream:
@@ -59,16 +72,20 @@ class DecisionStream:
     async def __anext__(self):
         tools = {tool.name: tool for tool in self.session.config.mcp_servers[0].tools}
         await tools["get_mission_status"].handler({})
-        if '"kind": "survey_analysis"' in self.prompt:
-            context = json.loads(await tools["get_survey_context"].handler({}))
+        if '"kind": "survey_analysis"' in self.prompt or '"kind": "survey_image"' in self.prompt:
+            # Crop-health turn: context (+ optional alert). Never steer the aircraft.
+            if '"kind": "survey_image"' in self.prompt:
+                assessment = json.dumps({
+                    "health_score": 0.8,
+                    "analysis_summary": "Limited evidence of healthy crop canopy.",
+                })
+                context = json.loads(await tools["get_survey_context"].handler({"assessment": assessment}))
+            else:
+                context = json.loads(await tools["get_survey_context"].handler({}))
             self.session.contexts.append(context)
             if self.session.alert:
                 await tools["send_photon_alert"].handler({})
-            action = self.session.decisions.pop(0)
-            if action:
-                result = json.loads(await tools["issue_drone_command"].handler(
-                    {"drone_id": "drone-1", "action": action}))
-                self.session.actions.append(result)
+            self.session.decisions.clear()
         elif ('"kind": "voice_start"' in self.prompt
               or "Inspect the status and request one survey." in self.prompt):
             await tools["issue_drone_command"].handler({"drone_id": "drone-1", "action": "start_survey"})
@@ -153,7 +170,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             await controller.handle("Inspect status and wait")
             result = await self.pipeline.process_photo(controller, self.path, capture_id)
             self.assertTrue(result["ok"])
+            # YOLO already turned home at photo time; LLM must not change phase.
             self.assertEqual(self.mission.snapshot()["phase"], "turn_home")
+            self.assertFalse(self.mission.analysis_waiting())
             session = DecisionSession.instances[-1]
             self.assertEqual(len(session.prompts), 2)
             self.assertEqual(session.contexts[0]["latest"]["vision_source"], "fake")
@@ -162,19 +181,16 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         reopened = SurveyPipeline(self.driver, FakeImageAnalyzer(), history_path=self.pipeline.history_path)
         self.assertEqual(len(reopened.context()["history"]), 1)
 
-    async def test_reimage_is_executed_by_camera_mailbox_and_reuses_session(self):
+    async def test_crop_analysis_clears_hold_without_steering(self):
         DecisionSession.decisions = ["capture_photo", "continue_survey"]
         capture_phase(self.mission)
-        deadline = self.mission._analysis_deadline
+        self.assertEqual(self.mission.snapshot()["phase"], "turn_home")
         async with DroidController(self.driver, pipeline=self.pipeline, session_factory=DecisionSession) as controller:
             await self.pipeline.process_photo(controller, self.path, self.driver.begin_analysis())
-            self.assertEqual(self.mission.snapshot()["phase"], "await_analysis")
-            self.assertTrue(self.driver.take_photo_request())
-            self.assertFalse(self.driver.issue("drone-1", "continue_survey")["ok"])
-            await self.pipeline.process_photo(controller, self.path, self.driver.begin_analysis())
             self.assertEqual(self.mission.snapshot()["phase"], "turn_home")
-            self.assertEqual(self.mission._analysis_deadline, deadline)
-            self.assertEqual(len(DecisionSession.instances[-1].prompts), 2)
+            self.assertFalse(self.driver.take_photo_request())
+            self.assertFalse(self.mission.analysis_waiting())
+            self.assertFalse(DecisionSession.instances[-1].actions)
 
     async def test_late_result_after_stop_cannot_decide_or_alert(self):
         capture_phase(self.mission)
@@ -193,13 +209,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "stale_or_stopped_analysis")
         self.assertFalse(self.driver.snapshot()["analysis_ready"])
 
-    async def test_narration_without_tool_decision_fails_closed(self):
-        DecisionSession.decisions = [None]
+    async def test_narration_without_flight_tool_still_completes_analysis(self):
+        DecisionSession.decisions = []
         capture_phase(self.mission)
         async with DroidController(self.driver, pipeline=self.pipeline, session_factory=DecisionSession) as controller:
-            with self.assertRaisesRegex(RuntimeError, "actionable"):
-                await self.pipeline.process_photo(controller, self.path, self.driver.begin_analysis())
-            self.assertTrue(self.driver.snapshot()["stopped"])
+            result = await self.pipeline.process_photo(controller, self.path, self.driver.begin_analysis())
+            self.assertTrue(result["ok"])
+            self.assertEqual(self.mission.snapshot()["phase"], "turn_home")
+            self.assertFalse(self.driver.snapshot()["stopped"])
 
     async def test_alert_tool_uses_only_host_registered_observation(self):
         class Notifier:
@@ -216,18 +233,6 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             controller._active = True
             with self.assertRaises(ValidationError):
                 await controller.tools[3].handler({"text": "arbitrary", "recipient": "other"})
-
-    async def test_real_reimage_waits_for_approval_and_timeout_revokes_it(self):
-        self.driver.mock = False
-        self.driver.auto_approve = False
-        DecisionSession.decisions = ["capture_photo"]
-        capture_phase(self.mission)
-        async with DroidController(self.driver, pipeline=self.pipeline, session_factory=DecisionSession) as controller:
-            await self.pipeline.process_photo(controller, self.path, self.driver.begin_analysis())
-            self.assertFalse(self.driver.take_photo_request())
-            self.assertEqual(self.driver.snapshot()["pending_approval"], "capture_photo")
-            self.mission.tick(np.zeros((100, 100, 3), dtype=np.uint8), self.mission._analysis_deadline + 1)
-            self.assertFalse(self.driver.approve_pending()["ok"])
 
     async def test_feature_history_is_field_scoped(self):
         capture_phase(self.mission)
@@ -337,7 +342,8 @@ class WorkerTests(unittest.TestCase):
                 if value.phase == "done":
                     return ord("q")
                 # Fast-forward only flight dwell timers, never the analysis deadline.
-                value._phase_t = time.time() - 8
+                # turn_home can require up to TURN_HOME_MAX_S (~14s) when the target tag stays in view.
+                value._phase_t = time.time() - 20
                 return -1
 
             stack.enter_context(patch.object(voice_mission.cv2, "waitKey", side_effect=key))
@@ -421,37 +427,34 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(worker.failed.is_set())
         self.assertTrue(driver.snapshot()["stopped"])
 
-    def test_hold_stays_stationary_and_times_out_without_cloud(self):
+    def test_after_photo_yolo_turns_home_while_analysis_hold_is_armed(self):
         value = mission()
         capture_phase(value)
+        self.assertEqual(value.snapshot()["phase"], "turn_home")
+        self.assertTrue(value.analysis_waiting())
         frame = np.zeros((100, 100, 3), dtype=np.uint8)
-        tick = value.tick(frame, value._analysis_deadline - 1)
-        self.assertEqual((tick.lr, tick.fwd, tick.up, tick.yaw), (0, 0, 0, 0))
-        tick = value.tick(frame, value._analysis_deadline + 1)
-        self.assertEqual(tick.action, "land")
-        self.assertEqual(value.snapshot()["phase"], "abort")
+        tick = value.tick(frame, time.time())
+        # Returning home: non-zero yaw scout, not a stationary analysis hover.
+        self.assertNotEqual(tick.yaw, 0)
+        self.assertIsNone(tick.action)
+        # Expiring the crop-LLM hold must not abort the return-home flight.
+        value._analysis_deadline = time.time() - 1
+        self.assertFalse(value.analysis_waiting())
+        self.assertEqual(value.snapshot()["phase"], "turn_home")
 
-    def test_analysis_timeout_latches_stop_and_is_not_a_completed_survey(self):
+    def test_analysis_hold_expiry_does_not_latch_stop(self):
         from ground_station.voice_mission import latch_mission_abort, survey_finished
 
         value = mission()
         driver = MissionDriver(value, mock=True)
         capture_phase(value)
-        frame = np.zeros((100, 100, 3), dtype=np.uint8)
-        tick = value.tick(frame, value._analysis_deadline + 1)
-        self.assertEqual(tick.action, "land")
-        self.assertEqual(value.snapshot()["phase"], "abort")
+        value._analysis_deadline = time.time() - 1
+        self.assertFalse(value.analysis_waiting())
+        self.assertEqual(value.snapshot()["phase"], "turn_home")
         self.assertFalse(driver.snapshot()["stopped"])
-        self.assertTrue(latch_mission_abort(driver, value.snapshot()["phase"]))
-        self.assertTrue(driver.snapshot()["stopped"])
-        self.assertFalse(driver.approve_pending()["ok"])
-        generation = driver.snapshot()["stop_generation"]
-        self.assertFalse(latch_mission_abort(driver, "abort"))
-        self.assertEqual(driver.snapshot()["stop_generation"], generation)
-        value.tick(frame, value._analysis_deadline + 2)
-        self.assertEqual(value.snapshot()["phase"], "done")
+        self.assertFalse(latch_mission_abort(driver, value.snapshot()["phase"]))
         self.assertFalse(survey_finished(
-            value.snapshot()["phase"], flying=False, stopped=driver.snapshot()["stopped"],
+            value.snapshot()["phase"], flying=True, stopped=False,
         ))
         self.assertTrue(survey_finished("done", flying=False, stopped=False))
 

@@ -18,12 +18,26 @@ class Drone(Protocol):
     def takeoff(self) -> None: ...
     def land(self) -> None: ...
     def emergency(self) -> None: ...
+    def flip(self, direction: str = "b") -> None: ...
     def get_frame(self) -> np.ndarray | None: ...
     def send_rc(self, left_right: int, forward: int, up: int, yaw: int) -> None: ...
     def hover(self) -> None: ...
     def capture_photo(self, path: Path | None = None) -> Path | None: ...
     def battery(self) -> int | None: ...
+    def get_height_cm(self) -> int | None: ...
+    def move_up_cm(self, cm: int) -> None: ...
+    def climb_to_ft(self, feet: float) -> None: ...
     def close(self) -> None: ...
+
+
+# Classic Tello takeoff settles near ~80–100 cm; used if ToF height is unavailable.
+_DEFAULT_TAKEOFF_CM = 90
+_MIN_MOVE_CM = 20
+_MAX_MOVE_CM = 500
+
+
+def _feet_to_cm(feet: float) -> int:
+    return int(round(float(feet) * 30.48))
 
 
 def _ensure_bgr(frame: np.ndarray) -> np.ndarray:
@@ -66,6 +80,29 @@ class TelloDrone:
     def takeoff(self) -> None:
         self._tello.takeoff()
 
+    def get_height_cm(self) -> int | None:
+        try:
+            return int(self._tello.get_height())
+        except Exception:
+            return None
+
+    def move_up_cm(self, cm: int) -> None:
+        cm = int(np.clip(cm, _MIN_MOVE_CM, _MAX_MOVE_CM))
+        self._tello.move_up(cm)
+
+    def climb_to_ft(self, feet: float) -> None:
+        """After takeoff, climb so ToF height is about `feet` above the pad."""
+        target = _feet_to_cm(feet)
+        height = self.get_height_cm()
+        if height is None or height <= 0:
+            height = _DEFAULT_TAKEOFF_CM
+        delta = target - height
+        if delta < _MIN_MOVE_CM:
+            print(f"cruise height ~{height} cm (target {target} cm); no climb")
+            return
+        print(f"climbing {delta} cm → ~{feet:.1f} ft cruise (now {height} cm)")
+        self.move_up_cm(delta)
+
     def land(self) -> None:
         self.hover()
         self._tello.land()
@@ -76,6 +113,17 @@ class TelloDrone:
             self._tello.emergency()
         except Exception:
             self._tello.land()
+
+    def flip(self, direction: str = "b") -> None:
+        """Flip once. direction: l/r/f/b (left/right/forward/back)."""
+        d = (direction or "b").strip().lower()[:1]
+        if d not in ("l", "r", "f", "b"):
+            d = "b"
+        self.hover()
+        time.sleep(0.3)
+        self._tello.flip(d)
+        time.sleep(0.5)
+        self.hover()
 
     def get_frame(self) -> np.ndarray | None:
         if self._frame_read is None:
@@ -145,11 +193,23 @@ class MockDrone:
     def takeoff(self) -> None:
         print("mock takeoff")
 
+    def get_height_cm(self) -> int | None:
+        return _DEFAULT_TAKEOFF_CM
+
+    def move_up_cm(self, cm: int) -> None:
+        print(f"mock move_up {cm} cm")
+
+    def climb_to_ft(self, feet: float) -> None:
+        print(f"mock climb_to_ft {feet:.1f}")
+
     def land(self) -> None:
         print("mock land")
 
     def emergency(self) -> None:
         print("mock emergency")
+
+    def flip(self, direction: str = "b") -> None:
+        print(f"mock flip {direction or 'b'}")
 
     def get_frame(self) -> np.ndarray | None:
         if self._cap is None:

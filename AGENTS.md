@@ -43,18 +43,22 @@ After the score is accepted, the host joins it with live NOAA/NASA weather in
 Chalk, stores the joined record when `CHALK_CLIENT_ID` is set, and sends the
 insight, JPEG, and an ElevenLabs clip through Photon outbound.
 
-Within one model turn:
+Flight path (host YOLO/AprilTag only): takeoff → approach poster → survey photo
+→ turn home → land. Crop-health LLM never steers RC.
+
+Within one image-analysis turn (runs in parallel after the photo):
 
 1. Droid reads mission status.
 2. Droid submits strict JSON to `get_survey_context(assessment=...)`.
 3. Host validates score/summary, optional Chalk features and capture liveness,
  then returns validated context and records local history.
-4. Droid requests a decision and optional alert, then returns identical JSON.
-5. Host validates final JSON before committing staged effects.
+4. Droid may request `send_photon_alert` for critical findings, then returns
+ identical assessment JSON. Host rejects `issue_drone_command` on this turn
+ (`flight_owned_by_host_yolo`); return-home already started after the photo.
 
 JSON has exactly `health_score` (finite `[0, 1]`) and `analysis_summary`
 (nonblank, ≤ 3,000 characters). Host supplies `field_id`. Invalid JSON,
-changed assessments, failed turns, and no-decision narration fail closed.
+changed assessments, and failed turns fail closed.
 Land/abort remain immediate. Stopped/stale/expired captures cannot resume.
 `--fake-analysis` explicitly supplies simulated analysis for mocks only.
 

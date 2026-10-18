@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Demo mission: Photon iMessage commands → Droid → local AprilTag/YOLO → Photon out.
+"""Demo mission: Photon iMessage → Droid; wheat vision on Factory e2b ONNX.
 
 Default radios: Tello on Mac Wi-Fi; internet + Uno Q via USB phone hotspot.
 
-Opt-in Photon bridge accepts start survey / abort / land after host preflight.
-Space aborts. q quits. Optional --crop-analysis sends the survey JPEG to Factory.
+Wheat/poster + AprilTag vision POSTs to Factory e2b (WHEAT_INFER_URL /
+scripts/wheat_e2b_up.sh). Opt-in Photon bridge accepts start/abort/land after
+host preflight. Space aborts. q quits. Optional --crop-analysis.
 """
 
 from __future__ import annotations
@@ -26,7 +27,14 @@ if str(ROOT) not in sys.path:
 from drone_interface.tello_client import MockDrone, TelloDrone
 from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
-from ground_station.mission import CLOSE_FEET_DEFAULT, FRAME_STALE_S, Gains, TAG_SIZE_M_DEFAULT, SurveyMission
+from ground_station.mission import (
+    CLOSE_FEET_DEFAULT,
+    CRUISE_HEIGHT_FT,
+    FRAME_STALE_S,
+    Gains,
+    TAG_SIZE_M_DEFAULT,
+    SurveyMission,
+)
 from ground_station.overlay import draw_hud_lines
 from ground_station.vision import DEFAULT_WEIGHTS, POSTER_ONNX, Box, resolve_weights
 
@@ -174,13 +182,23 @@ def parse_args() -> argparse.Namespace:
         "--wheat-model",
         choices=("heads", "poster"),
         default="heads",
-        help="wheat detector preset: heads (field YOLO) or poster (wheat_poster.onnx, 320)",
+        help="which ONNX the e2b server should be running (heads or poster@320)",
     )
     p.add_argument(
         "--weights",
         type=Path,
         default=None,
-        help="override weights path (else --wheat-model → models/wheat_*.onnx)",
+        help="local weights path only used with --local-vision",
+    )
+    p.add_argument(
+        "--local-vision",
+        action="store_true",
+        help="run wheat ONNX + AprilTag on this laptop (default: all vision on Factory e2b)",
+    )
+    p.add_argument(
+        "--wheat-infer-url",
+        default=None,
+        help="remote detect URL (default: WHEAT_INFER_URL or http://127.0.0.1:8767/detect)",
     )
     p.add_argument(
         "--auto",
@@ -195,10 +213,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hz", type=float, default=12.0)
     p.add_argument("--target-area", type=float, default=0.12)
     p.add_argument(
+        "--wheat-close",
+        type=float,
+        default=0.30,
+        help="wheat/poster: turn when box width is this fraction of the frame (0.3 = 30%% width)",
+    )
+    p.add_argument(
         "--close-feet",
         type=float,
         default=CLOSE_FEET_DEFAULT,
-        help="do not mark the target done until about this close (AprilTag width in frame)",
+        help="AprilTag stop distance in feet (larger = turn/land farther out)",
+    )
+    p.add_argument(
+        "--cruise-feet",
+        type=float,
+        default=CRUISE_HEIGHT_FT,
+        help="climb to this height (feet) right after takeoff before searching",
     )
     p.add_argument(
         "--tag-size-m",
@@ -293,6 +323,7 @@ def _run_mission(args, photon, cleanup) -> int:
         print("Network: Mac Wi-Fi → Tello; USB phone hotspot → internet + Uno Q.")
     gains = Gains(
         target_area=args.target_area,
+        wheat_close_frac=args.wheat_close,
         tag_size_m=args.tag_size_m,
         close_m=args.close_feet * 0.3048,
     )
@@ -305,6 +336,12 @@ def _run_mission(args, photon, cleanup) -> int:
         if phase == "abort" and photon is not None:
             photon.notify("abort")
 
+    if not args.local_vision:
+        print(
+            "All vision → Factory e2b "
+            f"({args.wheat_infer_url or os.environ.get('WHEAT_INFER_URL') or 'http://127.0.0.1:8767'}). "
+            "Run scripts/wheat_e2b_up.sh (poster/heads ONNX + AprilTag)."
+        )
     mission = SurveyMission(
         target_kind=args.target,
         family=args.family,
@@ -314,6 +351,8 @@ def _run_mission(args, photon, cleanup) -> int:
         weights=args.weights,
         on_phase=on_phase,
         analysis_required=args.want_crop,
+        local_vision=args.local_vision,
+        wheat_infer_url=args.wheat_infer_url,
     )
 
     if args.controller == "droid":
@@ -335,7 +374,10 @@ def _run_mission(args, photon, cleanup) -> int:
             )
             print("Crop analysis on: survey JPEG → Factory Droid → host validation → decision.")
         else:
-            print("Vision local: AprilTag/YOLO on laptop. Droid = high-level start/land only.")
+            if args.local_vision:
+                print("Vision: LOCAL laptop ONNX/AprilTag (override).")
+            else:
+                print("Vision: Factory e2b (wheat ONNX + AprilTag). Droid = mission tools.")
 
         if args.droid_machine:
             print(f"Droid session → Factory Computer {args.droid_machine[:8]}… (remote; MCP may fail)")
@@ -350,20 +392,25 @@ def _run_mission(args, photon, cleanup) -> int:
         )
         cleanup.callback(droid.close)
 
-    drone = (
-        MockDrone(args.camera)
-        if args.mock
-        else TelloDrone(
-            iface=args.tello_iface,
-            ssid=args.ssid,
-            dongle=args.dongle,
-            connect_wifi=not args.no_wifi_join,
+    # Real + Photon: accept iMessage first, join Tello only after start survey.
+    # Mock / non-phone: open the camera adapter immediately (no Wi-Fi join delay).
+    defer_tello = bool(args.phone_commands and not args.mock)
+    drone = None
+    if not defer_tello:
+        drone = (
+            MockDrone(args.camera)
+            if args.mock
+            else TelloDrone(
+                iface=args.tello_iface,
+                ssid=args.ssid,
+                dongle=args.dongle,
+                connect_wifi=not args.no_wifi_join,
+            )
         )
-    )
-    cleanup.callback(drone.close)
-    drone.connect()
-    drone.stream_on()
-    print("Tello stream up.")
+        cleanup.callback(drone.close)
+        drone.connect()
+        drone.stream_on()
+        print("Tello stream up." if not args.mock else "Mock camera up.")
 
     ingest = None
     if droid is not None:
@@ -400,7 +447,56 @@ def _run_mission(args, photon, cleanup) -> int:
                 print("Phone bridge did not become ready. No flight was started.")
                 return 1
             print(f"Phone commands ready on 127.0.0.1:{ingest.port}; "
-                  "phone start replaces y only after camera/battery preflight.")
+                  "text start survey → then join Tello → preflight → takeoff (no local y).")
+
+    if defer_tello:
+        print(
+            "Armed for Photon: send iMessage `start survey` when ready. "
+            "Tello Wi-Fi joins only after that message (Ctrl-C aborts)."
+        )
+        try:
+            while driver is not None and not driver.phone_start_armed():
+                if driver.snapshot()["stopped"]:
+                    print("Stop latched before Tello connect. No flight.")
+                    return 1
+                if ingest is not None and ingest.failed.is_set():
+                    print("Phone bridge failed before Tello connect. No flight.")
+                    return 1
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            if driver is not None:
+                driver.stop()
+            print("Interrupted before Tello connect. No flight.")
+            return 1
+        # Wi-Fi join can take longer than the default 60s approval TTL.
+        driver.refresh_phone_start(ttl_s=180.0)
+        print("Photon start armed — joining Tello now…")
+        try:
+            drone = TelloDrone(
+                iface=args.tello_iface,
+                ssid=args.ssid,
+                dongle=args.dongle,
+                connect_wifi=not args.no_wifi_join,
+            )
+        except Exception as exc:
+            print(f"Tello connect failed after phone start: {exc}. No flight.")
+            if driver is not None:
+                driver.stop()
+            if photon is not None:
+                photon.notify("controller_failed")
+            return 1
+        cleanup.callback(drone.close)
+        try:
+            drone.connect()
+            drone.stream_on()
+        except Exception as exc:
+            print(f"Tello stream failed after phone start: {exc}. No flight.")
+            if driver is not None:
+                driver.stop()
+            if photon is not None:
+                photon.notify("controller_failed")
+            return 1
+        print("Tello stream up.")
 
     last_ok = time.time()
     bat = drone.battery()
@@ -409,7 +505,10 @@ def _run_mission(args, photon, cleanup) -> int:
     flying = False
 
     if droid is not None:
-        if args.mock:
+        if args.phone_commands:
+            print("Photon text: start survey | abort | land  |  space stop  |  q quit "
+                  "(no y — phone start replaces local approval after preflight).")
+        elif args.mock:
             print("Droid mock: Photon text or tools queue start; space = stop, q = quit.")
         else:
             print("Text Photon agent “survey the wheat”. y = approve, space = stop, q = quit.")
@@ -450,10 +549,20 @@ def _run_mission(args, photon, cleanup) -> int:
                 # the finally block attempts landing even without its ACK.
                 flying = True
                 drone.takeoff()
+                try:
+                    drone.climb_to_ft(args.cruise_feet)
+                except Exception as exc:
+                    print(f"cruise climb failed ({exc}); continuing at takeoff height")
                 drone.hover()
                 if photon is not None:
                     photon.notify("takeoff")
-            elif tick.action == "land" and flying:
+            elif tick.action in ("land", "flip_land") and flying:
+                if tick.action == "flip_land":
+                    try:
+                        print("home arrival — flip then land")
+                        drone.flip("b")
+                    except Exception as exc:
+                        print(f"flip failed ({exc}); landing anyway")
                 drone.hover()
                 drone.land()
                 flying = False
@@ -489,9 +598,13 @@ def _run_mission(args, photon, cleanup) -> int:
 
             pending = driver.snapshot()["pending_approval"] if driver is not None else None
             hint = (
-                f"Photon | pending={pending or 'none'} | y approve | space stop | q quit"
-                if driver is not None
-                else "Photon text: survey | abort  |  q quit"
+                f"Photon | pending={pending or 'none'} | phone start (no y) | space stop | q quit"
+                if args.phone_commands
+                else (
+                    f"pending={pending or 'none'} | y approve | space stop | q quit"
+                    if driver is not None
+                    else "Photon text: survey | abort  |  q quit"
+                )
             )
             vis = (
                 draw_hud(

@@ -64,11 +64,13 @@ def yaw_forward(
     invert_lr: bool = False,
     forward_gate: float = 0.18,
     size_ratio: float | None = None,
+    center_before_fwd: bool = False,
 ) -> RcOut:
     """Strafe/yaw to center; keep creeping forward until the tag is large enough.
 
     Tello left_right: negative = left, positive = right.
     Tag left of center (err_x < 0) → slide left.
+    When center_before_fwd: hold forward until |err_x| <= forward_gate (lag-safe).
     """
     if box is None:
         return RcOut(0, 0, 0, 0, None, None)
@@ -90,8 +92,12 @@ def yaw_forward(
         gap = target_area - area
     if gap <= 0:
         return RcOut(yaw, 0, up, lr, err_x, area)
-    # Still too far: creep in even if not perfectly centered (slow down when offset).
     offset = abs(err_x)
+    # Home / laggy vision: center first, then drive — no diagonal swerve.
+    if center_before_fwd and offset > forward_gate:
+        return RcOut(yaw, 0, up, lr, err_x, area)
+    # Still too far: creep in even if not perfectly centered (slow down when offset).
     scale = 1.0 if offset <= forward_gate else max(0.35, 1.0 - offset)
-    fwd = max(clip_cmd(kp_fwd * gap * scale, max_fwd), 8 if scale >= 0.35 else 0)
+    # Floor 5 (was 8) keeps approach gentle on Tello RC.
+    fwd = max(clip_cmd(kp_fwd * gap * scale, max_fwd), 5 if scale >= 0.35 else 0)
     return RcOut(yaw, fwd, up, lr, err_x, area)

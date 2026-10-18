@@ -85,6 +85,26 @@ class MissionDriver:
             self._phone_start_until = None
             return self.approve_pending(flight_ready=True)
 
+    def phone_start_armed(self) -> bool:
+        """True once Photon/bridge parked a start (Tello may still be offline)."""
+        with self._lock:
+            self._expire_locked()
+            return (
+                self._phone_commands
+                and not self._stopped
+                and self._phone_start_until is not None
+                and self._pending is not None
+                and self._pending[0] == "start_survey"
+            )
+
+    def refresh_phone_start(self, *, ttl_s: float = APPROVAL_TTL_S) -> None:
+        """Extend one-shot phone auth while joining Tello after Photon start."""
+        with self._lock:
+            if self._phone_start_until is not None and not self._stopped:
+                self._phone_start_until = time.monotonic() + max(ttl_s, 1.0)
+                if self._pending is not None and self._pending[0] == "start_survey":
+                    self._pending = (self._pending[0], time.monotonic() + max(ttl_s, 1.0))
+
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             self._expire_locked()
@@ -96,6 +116,12 @@ class MissionDriver:
                 "survey_started": self._started,
                 "extra_photos_remaining": MAX_EXTRA_PHOTOS - self._photo_count,
                 "pending_approval": self._pending[0] if self._pending else None,
+                "phone_start_armed": (
+                    self._phone_commands
+                    and self._phone_start_until is not None
+                    and self._pending is not None
+                    and self._pending[0] == "start_survey"
+                ),
                 "capture_id": self._capture,
                 "analysis_ready": self._analysis_ready,
                 "photo_queued": self._photo,
@@ -132,6 +158,15 @@ class MissionDriver:
                 self._pending = (action, time.monotonic() + APPROVAL_TTL_S)
             if self._pending[0] != action:
                 return {"ok": False, "reason": "another_approval_pending"}
+            # Authenticated phone start: refresh one-shot TTL and tell the host
+            # camera loop (not local y) to consume after camera/battery preflight.
+            if (
+                action == "start_survey"
+                and self._phone_commands
+                and self._phone_start_until is not None
+            ):
+                self._phone_start_until = time.monotonic() + APPROVAL_TTL_S
+                return {"ok": False, "reason": "phone_preflight_required", "action": action}
             return {"ok": False, "reason": "local_approval_required", "action": action}
 
     def approve_pending(self, *, flight_ready: bool = False) -> dict[str, Any]:

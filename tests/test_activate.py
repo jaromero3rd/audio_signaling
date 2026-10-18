@@ -25,13 +25,25 @@ class ActivateTests(unittest.TestCase):
 
     def test_missing_token_fails_before_drone(self):
         parser = build_parser()
+        args = parser.parse_args(["--mock", "--photon"])
+        # No token in env and no default .env.phone-command in this process view
+        with patch.dict(os.environ, {"COMMAND_BRIDGE_TOKEN": ""}, clear=False), \
+             patch("ground_station.activate.ROOT", Path(tempfile.mkdtemp())):
+            rc = validate_before_drone(args)
+            self.assertEqual(rc, 1)
+
+    def test_default_phone_command_env_file(self):
+        parser = build_parser()
         with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            env_file = root / ".env.phone-command"
+            env_file.write_text("COMMAND_BRIDGE_TOKEN=" + "c" * 32 + "\nCOMMAND_BRIDGE_PORT=8787\n")
             args = parser.parse_args(["--mock", "--photon"])
-            # No token in env
-            with patch.dict(os.environ, {"COMMAND_BRIDGE_TOKEN": ""}, clear=False):
-                # Ensure no env file provides it
+            with patch.dict(os.environ, {"COMMAND_BRIDGE_TOKEN": ""}, clear=False), \
+                 patch("ground_station.activate.ROOT", root):
                 rc = validate_before_drone(args)
-                self.assertEqual(rc, 1)
+            self.assertEqual(rc, 0)
+            self.assertEqual(args.phone_command_env, env_file)
 
     def test_without_photon_warns(self):
         parser = build_parser()

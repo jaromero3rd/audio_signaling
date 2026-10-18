@@ -8,7 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from test_droid_pipeline import DecisionSession, capture_phase, mission
+try:
+    from test_droid_pipeline import DecisionSession, capture_phase, mission
+except ImportError:  # unittest discover -s tests
+    from tests.test_droid_pipeline import DecisionSession, capture_phase, mission
 from ground_station.agent.analysis import AnalysisError, DroidImageAnalyzer, MAX_IMAGE_BYTES
 from ground_station.agent.controller import ControllerError, DroidController
 from ground_station.agent.driver import MissionDriver
@@ -36,7 +39,9 @@ class ImageStream:
         tools = {t.name: t.handler for t in s.config.mcp_servers[0].tools}
         await tools["get_mission_status"]({})
         if s.early_decision:
-            await tools["issue_drone_command"]({"drone_id": "drone-1", "action": "continue_survey"})
+            early = json.loads(await tools["issue_drone_command"](
+                {"drone_id": "drone-1", "action": "continue_survey"}))
+            s.actions.append(early)
         context = json.loads(await tools["get_survey_context"]({"assessment": s.assessment}))
         s.contexts.append(context)
         if s.alert:
@@ -46,10 +51,12 @@ class ImageStream:
         if s.decision:
             result = json.loads(await tools["issue_drone_command"](
                 {"drone_id": "drone-1", "action": s.decision}))
+            s.actions.append(result)
             if s.decision in ("land", "abort"):
-                assert result["stopped"] is True
+                assert result.get("stopped") is True
             else:
-                assert result["executed"] is False
+                assert result.get("executed") is False
+                assert result.get("reason") == "flight_owned_by_host_yolo"
         if s.before_final:
             s.before_final()
         self.result = SimpleNamespace(success=s.success, text=s.final, session_id="persistent")
@@ -59,7 +66,7 @@ class ImageStream:
 class ImageSession(DecisionSession):
     assessment = ASSESSMENT
     final = ASSESSMENT
-    decision = "continue_survey"
+    decision = None  # crop LLM must not steer
     early_decision = False
     success = True
     before_decision = None
@@ -100,9 +107,11 @@ class ImageTurnTests(unittest.IsolatedAsyncioTestCase):
         capture_phase(self.mission)
         return await self.pipeline.process_photo(controller, self.path, self.driver.begin_analysis())
 
-    async def test_same_persistent_turn_has_image_validated_context_and_decision(self):
+    async def test_same_persistent_turn_has_image_validated_context_and_alert(self):
         def staged():
-            self.assertEqual(self.mission.phase, "await_analysis")
+            # YOLO already returning home; analysis hold still live until pipeline clears it.
+            self.assertEqual(self.mission.phase, "turn_home")
+            self.assertTrue(self.mission.analysis_waiting())
             self.assertFalse(self.alerts)
 
         async with DroidController(self.driver, pipeline=self.pipeline,
@@ -116,6 +125,7 @@ class ImageTurnTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(str(self.path), s.prompts[-1])
             self.assertEqual(s.contexts[0]["latest"]["features"]["health_flag"], "critical")
             self.assertEqual(self.mission.phase, "turn_home")
+            self.assertFalse(self.mission.analysis_waiting())
             self.assertEqual(len(self.alerts), 1)
             self.assertEqual(self.alerts[0]["vision_source"], "droid")
 
@@ -144,20 +154,24 @@ class ImageTurnTests(unittest.IsolatedAsyncioTestCase):
                 await self.run_photo(controller)
             self.assertFalse(self.alerts)
 
-    async def test_json_without_decision_tool_is_not_enough(self):
+    async def test_json_without_flight_tool_is_enough(self):
         async with DroidController(self.driver, pipeline=self.pipeline,
                                    session_factory=self.factory(decision=None)) as controller:
-            with self.assertRaisesRegex(ControllerError, "actionable"):
-                await self.run_photo(controller)
-            self.assertFalse(self.alerts)
+            result = await self.run_photo(controller)
+            self.assertTrue(result["ok"])
+            self.assertEqual(self.mission.phase, "turn_home")
+            self.assertEqual(len(self.alerts), 1)
 
-    async def test_decision_before_validated_context_is_rejected(self):
+    async def test_flight_command_on_image_turn_is_rejected_not_executed(self):
         async with DroidController(self.driver, pipeline=self.pipeline,
-                                   session_factory=self.factory(early_decision=True)) as controller:
-            with self.assertRaisesRegex(ControllerError, "validated"):
-                await self.run_photo(controller)
-            self.assertIsNone(self.pipeline.latest)
-            self.assertFalse(self.alerts)
+                                   session_factory=self.factory(
+                                       early_decision=True, decision="continue_survey")) as controller:
+            result = await self.run_photo(controller)
+            self.assertTrue(result["ok"])
+            s = ImageSession.instances[-1]
+            self.assertTrue(all(a.get("reason") == "flight_owned_by_host_yolo" for a in s.actions))
+            self.assertEqual(self.mission.phase, "turn_home")
+            self.assertEqual(len(self.alerts), 1)
 
     async def test_operator_stop_during_turn_cancels_staged_effects(self):
         async with DroidController(self.driver, pipeline=self.pipeline,

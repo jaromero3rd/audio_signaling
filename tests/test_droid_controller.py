@@ -387,7 +387,12 @@ class ExistingMissionRegressionTests(unittest.TestCase):
         from ground_station.mission import Gains, SurveyMission
 
         mission = SurveyMission(
-            target_kind="tag", family="36h11", target_tag=12, home_tag=12, gains=Gains()
+            target_kind="tag",
+            family="36h11",
+            target_tag=12,
+            home_tag=12,
+            gains=Gains(),
+            local_vision=True,
         )
         self.assertTrue(mission.request_start()["ok"])
         responses = []

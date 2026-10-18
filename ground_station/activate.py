@@ -21,6 +21,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def _resolve_bun() -> str | None:
+    """Find bun even when the login shell PATH was not reloaded."""
+    import shutil
+
+    found = shutil.which("bun")
+    if found:
+        return found
+    home = Path.home() / ".bun" / "bin" / "bun"
+    if home.is_file() and os.access(home, os.X_OK):
+        return str(home)
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="activate: arm and wait indefinitely for Photon iMessages → Droid → drone",
@@ -53,9 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--camera", type=int, default=0)
     p.add_argument("--family", default="36h11")
     p.add_argument("--home-tag", type=int, default=12)
-    p.add_argument("--target", choices=("auto", "wheat", "tag"), default="auto")
+    p.add_argument("--target", choices=("auto", "wheat", "tag"), default="wheat")
     p.add_argument("--target-tag", type=int, default=12)
-    p.add_argument("--wheat-model", choices=("heads", "poster"), default="heads")
+    p.add_argument("--wheat-model", choices=("heads", "poster"), default="poster")
     p.add_argument("--weights", type=Path, default=None)
     p.add_argument("--no-voice", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--hz", type=float, default=12.0)
@@ -75,13 +88,19 @@ def validate_before_drone(args: argparse.Namespace) -> int:
         return 2
     # Map --photon -> --phone-commands
     args.phone_commands = True
+    # Default private token file (same one Bun loads via --env-file).
+    if args.phone_command_env is None:
+        default_phone = ROOT / ".env.phone-command"
+        if default_phone.is_file():
+            args.phone_command_env = default_phone
     # Validate bridge token/port before opening drone/video
     from ground_station.phone_command import BridgeSettings
     try:
         args.bridge_settings = BridgeSettings.load(args.phone_command_env)
     except (ValueError, OSError):
         print("Phone bridge setup failed. Check COMMAND_BRIDGE_TOKEN (32+ ASCII characters) "
-              "and COMMAND_BRIDGE_PORT (1–65535). No drone connection opened.")
+              "and COMMAND_BRIDGE_PORT (1–65535). Create repo-root .env.phone-command "
+              "(see SETUP.md) or pass --phone-command-env. No drone connection opened.")
         return 1
     return 0
 
@@ -89,19 +108,16 @@ def validate_before_drone(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    # Load .env before bridge validation (token may live there or in .env.phone-command).
+    from ground_station.envutil import load_dotenv
+    from ground_station.voice_mission import _run_mission
+
+    load_dotenv()
     # --auto is accepted as no-op for activate (always waits)
     rc = validate_before_drone(args)
     if rc != 0:
         return rc
-    # Delegate to voice_mission with Bun spawn
-    # We need to translate args to voice_mission's parse_args namespace.
-    # Instead of re-invoking parser, set env and call voice_mission with our args.
-    from ground_station.voice_mission import main as vm_main, _run_mission
-    from ground_station.envutil import load_dotenv
-    from pathlib import Path as P
-
     # Replicate voice_mission main setup but with Bun management
-    load_dotenv()
     if args.weights is None:
         from ground_station.vision import POSTER_ONNX, DEFAULT_WEIGHTS, resolve_weights
         args.weights = POSTER_ONNX if args.wheat_model == "poster" else DEFAULT_WEIGHTS
@@ -111,12 +127,25 @@ def main() -> int:
 
     if args.controller == "droid" and not args.allow_real_flight:
         args.mock = True
-    # --auto already handled: do not reject
+    # --auto already handled: do not reject (phone bridge replaces local y)
     if args.fake_analysis and not args.mock:
         print("Simulated analysis is forbidden with real hardware.")
         return 1
     # --phone-commands already set; bridge_settings already validated
     args.want_crop = bool(args.crop_analysis or args.fake_analysis)
+    # Defaults voice_mission.parse_args would have set (activate has a thinner CLI).
+    from ground_station.mission import CLOSE_FEET_DEFAULT, CRUISE_HEIGHT_FT, WHEAT_CLOSE_FRAC_DEFAULT
+
+    if not hasattr(args, "wheat_close"):
+        args.wheat_close = WHEAT_CLOSE_FRAC_DEFAULT
+    if not hasattr(args, "cruise_feet"):
+        args.cruise_feet = CRUISE_HEIGHT_FT
+    if not hasattr(args, "local_vision"):
+        args.local_vision = False
+    if not hasattr(args, "wheat_infer_url"):
+        args.wheat_infer_url = None
+    if not hasattr(args, "close_feet") or args.close_feet is None:
+        args.close_feet = CLOSE_FEET_DEFAULT
     if args.droid_e2b and not args.droid_machine:
         args.droid_machine = os.environ.get("FACTORY_COMPUTER_ID") or None
         if not args.droid_machine:
@@ -148,16 +177,23 @@ def main() -> int:
                 print(f"Photon setup failed: {e}. No drone connection opened.")
                 return 1
 
-        # Spawn Bun process
+        # Spawn Bun process (Photon inbound agent)
         bun_proc = None
         try:
-            bun_cmd = ["bun", "--env-file=.env", "--env-file=../.env.phone-command", "run", "src/index.ts"]
-            # Prefer absolute .env locations if present
+            bun_bin = _resolve_bun()
+            if bun_bin is None:
+                print(
+                    "bun not found; install Bun to use --photon "
+                    "(curl -fsSL https://bun.sh/install | bash). No drone connection opened."
+                )
+                return 1
             env_files = []
             for f in [ROOT / ".env", ROOT / ".env.phone-command", ROOT / "photon-imessage-agent" / ".env"]:
                 if f.is_file():
-                    env_files.append(f)
-            # Use Popen with cwd
+                    env_files.append(f"--env-file={f}")
+            if not env_files:
+                env_files = ["--env-file=.env", "--env-file=../.env.phone-command"]
+            bun_cmd = [bun_bin, *env_files, "run", "src/index.ts"]
             bun_proc = subprocess.Popen(
                 bun_cmd,
                 cwd=str(ROOT / "photon-imessage-agent"),
@@ -165,6 +201,7 @@ def main() -> int:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env={**os.environ, "PATH": f"{Path.home() / '.bun' / 'bin'}:{os.environ.get('PATH', '')}"},
             )
             def tee_output():
                 assert bun_proc.stdout is not None
@@ -183,9 +220,10 @@ def main() -> int:
             if bun_proc.poll() is not None:
                 print("Photon Bun agent exited early. Check photon-imessage-agent/.env and COMMAND_BRIDGE_TOKEN.")
                 return 1
-            print("Photon Bun agent launched; waiting for Phone commands ready + Photon READY...")
-            # Give voice_mission time to start 8787 bridge; _run_mission will print "Phone commands ready"
-            # We don't block indefinitely here; _run_mission handles the indefinite wait via mission loop
+            print(
+                "Photon Bun agent launched; bridge arms before Tello. "
+                "Wait for Phone commands ready, then iMessage start survey to join the drone."
+            )
         except FileNotFoundError:
             print("bun not found; install Bun to use --photon. No drone connection opened.")
             return 1
