@@ -7,8 +7,11 @@ import unittest
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 from ground_station.agent.session import main as session_main
 from ground_station import voice_mission
+from ground_station.phone_command import BridgeSettings
 
 
 class RuntimeTests(unittest.TestCase):
@@ -109,6 +112,79 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(factory.call_args.args[0].auto_approve)
             real_fake.takeoff.assert_not_called()
             real_fake.close.assert_called_once()
+
+    def test_default_does_not_start_an_http_command_listener(self):
+        with ExitStack() as stack:
+            self.environment(stack)
+            bridge = stack.enter_context(patch("ground_station.phone_command.PhoneCommandBridge"))
+            old = stack.enter_context(patch("ground_station.operator_http.OperatorCommandServer"))
+            self.assertEqual(voice_mission.main(), 0)
+            bridge.assert_not_called()
+            old.assert_not_called()
+
+    def test_outbound_photon_configuration_never_enables_another_ingress(self):
+        with ExitStack() as stack:
+            _, _, worker, _ = self.environment(stack)
+            sys.argv.remove("--no-photon")
+            stack.enter_context(patch("ground_station.photon.PhotonConfig.load", return_value=MagicMock()))
+            stack.enter_context(patch("ground_station.photon.PhotonClient"))
+            stack.enter_context(patch("ground_station.photon.PhotonNotifier"))
+            stack.enter_context(patch("ground_station.voice_note.VoiceNoteSynthesizer.from_env", return_value=None))
+            legacy = stack.enter_context(patch("ground_station.photon_inbound.PhotonInbound"))
+            old = stack.enter_context(patch("ground_station.operator_http.OperatorCommandServer"))
+            bridge = stack.enter_context(patch("ground_station.phone_command.PhoneCommandBridge"))
+            self.assertEqual(voice_mission.main(), 0)
+            legacy.assert_not_called()
+            old.assert_not_called()
+            bridge.assert_not_called()
+            self.assertIn("Do not start yet", worker.start.call_args.args[0])
+
+    def test_bad_phone_settings_fail_before_opening_devices(self):
+        for flags in (["--phone-commands"], ["--phone-command-env", "/nonexistent/private.env"]):
+            with patch.object(sys, "argv", ["demo", "--mock", "--no-voice", "--no-photon", *flags]), \
+                 patch.object(voice_mission, "load_dotenv"), \
+                 patch.dict("os.environ", {"COMMAND_BRIDGE_TOKEN": ""}), \
+                 patch.object(voice_mission, "MockDrone") as drone:
+                self.assertEqual(voice_mission.main(), 1)
+                drone.assert_not_called()
+
+    def test_phone_mode_waits_instead_of_requesting_an_automatic_survey(self):
+        with ExitStack() as stack:
+            drone, _, worker, _ = self.environment(stack)
+            sys.argv.append("--phone-commands")
+            stack.enter_context(patch("ground_station.phone_command.BridgeSettings.load",
+                                      return_value=BridgeSettings("synthetic-test-token-for-runtime-0000", 0)))
+            self.assertEqual(voice_mission.main(), 0)
+            self.assertIn("Do not start yet", worker.start.call_args.args[0])
+            drone.takeoff.assert_not_called()
+
+    def test_real_phone_start_needs_preflight_but_not_local_y(self):
+        for camera, battery, expected in ((True, 90, True), (False, 90, False),
+                                           (True, 10, False), (True, None, False)):
+            with self.subTest(camera=camera, battery=battery), ExitStack() as stack:
+                _, tello, worker, factory = self.environment(stack)
+                sys.argv.remove("--mock")
+                sys.argv.remove("--fake-analysis")
+                sys.argv.extend(["--allow-real-flight", "--phone-commands"])
+                drone = tello.return_value
+                drone.get_frame.return_value = np.zeros((64, 64, 3), dtype=np.uint8) if camera else None
+                drone.battery.return_value = battery
+                stack.enter_context(patch("ground_station.phone_command.BridgeSettings.load",
+                                          return_value=BridgeSettings("synthetic-test-token-for-runtime-0000", 0)))
+                stack.enter_context(patch.object(voice_mission.cv2, "waitKey", side_effect=[-1, ord("q")]))
+
+                def start(bridge):
+                    bridge.gateway.request_start()
+                    bridge.ready.set()
+
+                stack.enter_context(patch("ground_station.phone_command.PhoneCommandBridge.start",
+                                          autospec=True, side_effect=start))
+                worker.submit.side_effect = lambda *_: (
+                    factory.call_args.args[0].issue("drone-1", "start_survey") is not None
+                )
+                self.assertEqual(voice_mission.main(), 0)
+                self.assertEqual(drone.takeoff.call_count, int(expected))
+                self.assertFalse(factory.call_args.args[0].auto_approve)
 
 
 if __name__ == "__main__":

@@ -2,8 +2,9 @@ import { ApiError, Photon } from "@photon-ai/api";
 import { io } from "socket.io-client";
 import { checkpoint, spaceContext } from "./checkpoint";
 import { configuration, SetupError } from "./config";
+import { commandForwarder } from "./command";
 import {
-  audioRefFor, audioReplyFor, commandReplyFor, inboundTextFor, operatorReply,
+  audioRefFor, audioReplyFor, commandReplyFor, inboundTextFor,
   record, spaceContextFor,
 } from "./handler";
 import { transcribeAudio } from "./transcribe";
@@ -20,7 +21,7 @@ function report(error: unknown) {
   }
 }
 
-const dispatchedIds = new Set<string>();
+type Commands = ReturnType<typeof commandForwarder>;
 
 function voiceFail(event: unknown, config: ReturnType<typeof configuration>, message: string) {
   return audioReplyFor(event, config, message);
@@ -31,8 +32,9 @@ async function voiceReply(
   config: ReturnType<typeof configuration>,
   event: unknown,
   attachmentId: string,
-  inboundId?: string,
+  commands: Commands,
 ) {
+  if (!commands.enabled) return voiceFail(event, config, "Phone commands are disabled on this laptop.");
   try {
     const key = process.env.ELEVENLABS_API_KEY ?? "";
     if (!key.trim()) {
@@ -67,37 +69,16 @@ async function voiceReply(
     } catch {
       return voiceFail(event, config, "Could not transcribe the voice memo. Try sending text instead.");
     }
-    const droid = await dispatchToDroid(transcript, inboundId);
+    const droid = await commands.forward(event, config, transcript);
     return audioReplyFor(event, config, droid);
   } catch {
     return voiceFail(event, config, "Could not process the voice memo. Try sending text instead.");
   }
 }
 
-async function dispatchToDroid(text: string, inboundId?: string): Promise<string> {
-  if (inboundId && dispatchedIds.has(inboundId)) return "Already forwarded to Droid.";
-  const url = (process.env.DROID_COMMAND_URL || "http://127.0.0.1:8766/operator-command").trim();
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text }),
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!response.ok) return "Droid ingest failed on the laptop.";
-    const payload = await response.json() as { message?: unknown; ok?: unknown };
-    const reply = typeof payload.message === "string" && payload.message.trim()
-      ? operatorReply(payload.message)
-      : payload.ok === false ? "Droid rejected the request." : "Queued for Droid.";
-    if (inboundId) dispatchedIds.add(inboundId);
-    return reply;
-  } catch {
-    return "Droid is not running on the laptop. Start demo.py so Photon can reach Droid.";
-  }
-}
-
 async function main() {
   const config = configuration();
+  const commands = commandForwarder();
   const photon = new Photon({
     headers: { Authorization: `Bearer ${config.key}`, "User-Agent": "AgriDrone-Photon-Agent/0.1" },
     timeoutMs: 20_000,
@@ -193,17 +174,15 @@ async function main() {
       if (ctx) spaces.write(ctx);
       const audio = audioRefFor(event, config);
       const spoken = inboundTextFor(event, config);
-      const inboundMessage = record(record(record(event).data).object);
-      const inboundId = audio?.messageId ?? (typeof inboundMessage.id === "string" ? inboundMessage.id : undefined);
       const input = audio
-        ? await voiceReply(photon, config, event, audio.attachmentId, inboundId)
+        ? await voiceReply(photon, config, event, audio.attachmentId, commands)
         : spoken
-          ? commandReplyFor(event, config, await dispatchToDroid(spoken, inboundId))
+          ? commandReplyFor(event, config, await commands.forward(event, config))
           : undefined;
       if (input) {
         console.info(audio
           ? "Inbound voice memo matched; sending host reply."
-          : "Inbound iMessage matched; forwarding the command to Droid.");
+          : "Inbound iMessage matched; sending host command result.");
         const sent = await photon.projects.sendMessage(input);
         if (typeof sent.id !== "string" || !/^pho_msg_[0-7][0-9a-hjkmnp-tv-z]{25}$/.test(sent.id)) {
           throw new SetupError("Photon accepted the reply but returned no valid message ID. Preserve the checkpoint for idempotent recovery.");

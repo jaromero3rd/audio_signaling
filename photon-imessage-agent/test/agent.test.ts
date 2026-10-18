@@ -29,7 +29,7 @@ function inbound() {
         sentBy: { id: `pho_usr_${"1".repeat(26)}`, platform: "imessage", kind: "human", handle: config.sender },
         receivedBy: { id: `pho_usr_${"0".repeat(26)}`, platform: "imessage", kind: "agent", handle: config.agent },
         space: { id: `pho_spc_${"0".repeat(26)}`, platform: "imessage", kind: "direct" },
-        content: { type: "text", format: "plain", text: "Hello Photon" },
+        content: { type: "text", format: "plain", text: "Hello Photon" } as Record<string, string | undefined>,
       },
     },
   };

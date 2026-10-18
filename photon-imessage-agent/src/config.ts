@@ -9,6 +9,11 @@ export type Config = {
 };
 
 export function configuration(env: Record<string, string | undefined> = process.env): Config {
+  const operator = env.PHOTON_USER_HANDLE?.trim() || env.PHOTON_TEST_SENDER?.trim();
+  if (env.PHOTON_USER_HANDLE?.trim() && env.PHOTON_TEST_SENDER?.trim() &&
+      env.PHOTON_USER_HANDLE.trim() !== env.PHOTON_TEST_SENDER.trim()) {
+    throw new SetupError("PHOTON_USER_HANDLE and PHOTON_TEST_SENDER must identify the same operator.");
+  }
   const required = (name: string) => {
     const value = env[name]?.trim();
     if (!value) throw new SetupError(`Missing ${name}.`);
@@ -17,7 +22,7 @@ export function configuration(env: Record<string, string | undefined> = process.
   const config = {
     key: required("PHOTON_API_KEY"),
     project: required("PHOTON_PROJECT_ID"),
-    sender: required("PHOTON_TEST_SENDER"),
+    sender: operator || required("PHOTON_USER_HANDLE"),
     agent: required("PHOTON_AGENT_HANDLE"),
     assignment: required("PHOTON_ASSIGNMENT_ID"),
   };

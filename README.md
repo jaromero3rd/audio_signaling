@@ -12,7 +12,9 @@ a field data stream for photos, telemetry, and crop summaries.
 | Optional decision features | Chalk, or explicitly labeled local thresholds |
 
 The command chain activates the mission. The data stream never starts a flight.
-No ElevenAgents voice command path.
+No ElevenAgents voice command path. Phone ingress is opt-in on both processes.
+`--phone-commands` waits for the phone, even with `--no-photon`.
+`--no-voice` is a legacy no-op.
 
 **Photon cannot place calls.** An urgent alert is text marked URGENT plus an
 optional audio attachment, not a telephone call. No telephony integration is used.
@@ -23,9 +25,9 @@ Crop-health scores are uncertain visual estimates, not verified diagnoses.
 ```text
 operator iMessage text (or phone dictation → text)
     → Photon direct space (inbound)
-    → PhotonInbound / operator HTTP ingest → DroidVoiceGateway
+    → same-laptop authenticated opt-in bridge → DroidVoiceGateway
     → persistent Droid queues start_survey
-    → local y approval
+    → one-shot phone authorization + camera/battery preflight
     → drone adapter takeoff
 ```
 
@@ -53,8 +55,10 @@ mission and requests landing. Emergency stop bypasses cloud latency.
 
 Image decisions and alerts are staged until the final assessment validates.
 The host controls paths, recipients, alert formatting, limits, and approvals.
-Real starts and extra photos require local `y` approval.
-Only the camera loop calls hardware. `--allow-real-flight` is also required.
+Real starts and extra photos require local `y` approval,
+except an explicit authenticated phone start replaces `y` for one survey after
+camera/battery preflight. Only the camera loop calls hardware.
+`--allow-real-flight` is still required. See [phone setup](SETUP.md#enable-the-same-laptop-bridge).
 
 ## Setup and safe checks
 
@@ -78,13 +82,15 @@ python demo.py --mock --target tag --target-tag 12 --home-tag 12 \
 `--fake-analysis` is explicitly simulated and forbidden on real hardware.
 It is not a fallback for a failed model. A webcam demo is not a headless test.
 
-With Photon configured, text the agent `survey` / `abort`. To enable native
+With the phone bridge configured, text the agent `start survey`, `abort`, or
+`land`. To enable native
 image analysis, replace `--fake-analysis` with `--crop-analysis`.
 Both use the same persistent Droid session. Wheat poster YOLO (320 ONNX):
 `--target wheat --wheat-model poster`.
 
 Photon credentials enable **real iMessages even in mock mode**, labeled MOCK.
-Keep `--no-photon` for local-only runs. Critical analysis alerts requested by
+`--no-photon` disables Python outbound only; omit `--phone-commands` and do not
+run Bun for a local-only demo. Critical analysis alerts requested by
 Droid get text plus a voice note when TTS is configured. Non-critical alerts
 are text-only unless the operator passes `--voice-notes`.
 

@@ -5,11 +5,12 @@ It uses `@photon-ai/api` and the beta Socket.IO event stream. The legacy
 Photon CLI and `create-spectrum-project` do not configure beta projects.
 
 This process is the Photon inbound bridge: authorized iMessage text/dictation
-on the configured direct space is POSTed to the laptop loopback ingest
-(`DROID_COMMAND_URL`, default `http://127.0.0.1:8766/operator-command`),
-mapped with `map_intent`, and handed to Droid. It does not fly by itself.
-Queued `start_survey` is not takeoff; local `y` on the laptop still approves
-real hardware. The data stream (survey JPEG, status text, voice notes) uses
+on the configured direct space can be POSTed to the authenticated laptop
+bridge at `http://127.0.0.1:8787/command`. It is **off by default**.
+Only `start survey`, `abort`, and `land` (plus a few exact command aliases)
+are accepted, not arbitrary text, questions or negations. It does not fly
+by itself. Phone start replaces local `y` for one survey after camera/battery
+preflight. Queued start is not takeoff. The data stream uses
 the same space outbound from Python `photon.py`.
 
 Only iMessage is handled. iPhone dictation arrives as plain text. Voice memos
@@ -17,8 +18,14 @@ are transcribed with ElevenLabs Scribe only if Photon delivers audio on this
 assignment (often it does not). Photos and other non-audio attachments are
 ignored. Replies are ingest results from the host, not parroted inbound text.
 
-Run `bun start` from this directory next to `python demo.py --mock` (or
-`--no-voice`) / `voice_mission` so ingest on `127.0.0.1:8766` is up.
+Run on the **same laptop connected to the drone**. Follow
+[phone bridge setup](../SETUP.md#enable-the-same-laptop-bridge) for a shared
+private token and both launch commands. Python needs `--phone-commands`;
+Bun needs `COMMAND_BRIDGE_ENABLED=true` and the same `COMMAND_BRIDGE_TOKEN`
+(32+ printable ASCII characters), with matching `COMMAND_BRIDGE_PORT`.
+No automatic laptop/drone discovery or remote `DROID_COMMAND_URL` is used.
+`--phone-commands` waits for the phone (`--no-voice` is a legacy no-op). Real hardware additionally
+requires `--allow-real-flight`. Other starts and extra photos retain local approval.
 
 ## Local commands
 
@@ -33,9 +40,12 @@ bun start
 ```
 
 Bun loads this directory's private `.env`. Copy `.env.example` only when setting
-up a new environment, then supply the beta API key, project ID, test sender,
+up a new environment, then supply the beta API key, project ID, operator handle,
 assigned agent number, and active assignment ID. Never commit these values.
 The root repository's `.env` is not loaded by this agent.
+Use `PHOTON_USER_HANDLE` for the single authorized operator; legacy
+`PHOTON_TEST_SENDER` works too. If both are set they must match.
+Disabled phone commands do not contact Python or transcribe audio.
 
 `--check` verifies the project's credentials and active sender assignment
 without subscribing or sending messages. Startup performs the same checks,
@@ -51,6 +61,14 @@ registered in Photon, not an Apple-account email or SMS.
 - Only the configured human sender, agent, project, and direct iMessage
   conversations can trigger ingest. Other channels and outbound events
   cannot trigger a command loop.
+- The original Photon `timestamps.receivedAt` must be within 30 seconds
+  (at most 5 seconds future skew), including after transcription or replay.
+  The host deduplicates message IDs in a bounded expiring cache. Keep the
+  cursor across restarts; do not retry an old flight request with a new ID.
+- Forwarding uses a fixed loopback address, bearer auth, no redirects and a
+  2.5-second timeout. Abort/land latch host stop without waiting for Droid;
+  Photon and serial event handling can still delay them. Use local spacebar
+  for immediate stop. Replies never confirm physical takeoff or landing.
 - Logs do not include keys, phone numbers, or inbound message text. Replies
   are ingest results, not parrot echoes.
 - Replies use the incoming Space ID, receiving agent User ID, and message ID.

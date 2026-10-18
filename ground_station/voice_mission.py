@@ -3,7 +3,7 @@
 
 Default radios: Tello on Mac Wi-Fi; internet + Uno Q via USB phone hotspot.
 
-Text the Photon agent (survey / abort). Local y approves pending hardware.
+Opt-in Photon bridge accepts start survey / abort / land after host preflight.
 Space aborts. q quits. Optional --crop-analysis sends the survey JPEG to Factory.
 """
 
@@ -110,7 +110,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mock", action="store_true")
     p.add_argument("--controller", choices=("droid",), default="droid")
     p.add_argument("--allow-real-flight", action="store_true",
-                   help="explicitly enable Tello in Droid mode; each start still needs local y approval")
+                   help="explicitly enable Tello; starts need local y or opt-in phone authorization")
     p.add_argument("--droid-model", default=None, help="Factory model ID (default: CLI setting)")
     p.add_argument("--droid-timeout", type=float, default=60.0)
     p.add_argument(
@@ -128,7 +128,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--droid-prompt", default=None,
                    help="initial operator instruction for the persistent Droid session")
     p.add_argument("--photon-env", type=Path, help="private Photon environment file (not passed to Droid)")
-    p.add_argument("--no-photon", action="store_true", help="disable Photon inbound commands and outbound notifications")
+    p.add_argument("--no-photon", action="store_true", help="disable Python outbound notifications, not opt-in phone ingress")
+    p.add_argument("--phone-commands", action="store_true",
+                   help="enable authenticated loopback start/abort/land; phone start replaces local y after preflight")
+    p.add_argument("--phone-command-env", type=Path,
+                   help="private COMMAND_BRIDGE_TOKEN/PORT file; requires --phone-commands")
     p.add_argument("--voice-notes", action="store_true",
                    help="optional ElevenLabs TTS for non-critical analysis alerts (text always sent)")
     p.add_argument("--field-id", default="field-1")
@@ -220,6 +224,20 @@ def main() -> int:
     if args.fake_analysis and not args.mock:
         print("Simulated analysis is forbidden with real hardware.")
         return 1
+    args.bridge_settings = None
+    if args.phone_command_env is not None and not args.phone_commands:
+        print("--phone-command-env requires --phone-commands. No drone connection opened.")
+        return 1
+    if args.phone_commands:
+        from ground_station.phone_command import BridgeSettings
+
+        try:
+            args.bridge_settings = BridgeSettings.load(args.phone_command_env)
+        except (ValueError, OSError):
+            print("Phone bridge setup failed. Check COMMAND_BRIDGE_TOKEN (32+ ASCII characters) "
+                  "and COMMAND_BRIDGE_PORT (1–65535). No drone connection opened.")
+            return 1
+    # Crop-health is opt-in. Default path: local AprilTag/YOLO + Droid high-level tools.
     args.want_crop = bool(args.crop_analysis or args.fake_analysis)
     if args.droid_e2b and not args.droid_machine:
         args.droid_machine = os.environ.get("FACTORY_COMPUTER_ID") or None
@@ -259,16 +277,16 @@ def main() -> int:
                     )
                     photon.start()
                     cleanup.callback(photon.close)
-                    print("Photon notifications + inbound commands configured.")
+                    print("Photon outbound notifications configured; phone commands require separate opt-in.")
                 elif args.controller == "droid":
-                    print("Photon is not configured; use --photon-env or PHOTON_* in .env for iMessage commands.")
+                    print("Photon outbound is not configured; use --photon-env or PHOTON_* in .env.")
             except PhotonError as error:
                 print(f"Photon setup failed: {error}. No drone connection opened.")
                 return 1
-        return _run_mission(args, photon, photon_client, cleanup)
+        return _run_mission(args, photon, cleanup)
 
 
-def _run_mission(args, photon, photon_client, cleanup) -> int:
+def _run_mission(args, photon, cleanup) -> int:
     if args.dongle is not None:
         print(f"Network: USB dongle {args.dongle} → Tello; keep phone USB for internet.")
     else:
@@ -281,7 +299,6 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
     target_tag = None if args.target_tag < 0 else args.target_tag
     droid = None
     driver = None
-    inbound = None
 
     def on_phase(prev: str, phase: str) -> None:
         print(f"mission {prev} → {phase}")
@@ -303,7 +320,7 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
         from ground_station.agent.driver import MissionDriver
         from ground_station.agent.worker import DroidWorker
 
-        driver = MissionDriver(mission, mock=args.mock)
+        driver = MissionDriver(mission, mock=args.mock, phone_commands=args.phone_commands)
         pipeline = None
         if args.want_crop:
             from ground_station.agent.analysis import FakeImageAnalyzer, DroidImageAnalyzer
@@ -348,11 +365,12 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
     drone.stream_on()
     print("Tello stream up.")
 
+    ingest = None
     if droid is not None:
         if args.droid_prompt:
             instruction = args.droid_prompt
-        elif args.no_photon:
-            # Offline / --no-photon: one survey through Droid (same gates as Photon start).
+        elif args.no_photon and not args.phone_commands:
+            # Host fallback retains normal approval; phone mode must wait.
             instruction = "Inspect the status and request one survey."
         else:
             instruction = (
@@ -364,37 +382,25 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
             if photon is not None:
                 photon.notify("controller_failed")
             return 1
+        if args.phone_commands:
+            from ground_station.agent.worker import DroidVoiceGateway
+            from ground_station.phone_command import PhoneCommandBridge, PhoneCommandGateway
 
-        # Phone → Photon agent → HTTP ingest (optional companion to Socket.IO inbound).
-        from ground_station.agent.worker import DroidVoiceGateway
-        from ground_station.operator_http import OperatorCommandServer
-
-        ingest = OperatorCommandServer(DroidVoiceGateway(droid, driver))
-        ingest.start()
-        cleanup.callback(ingest.close)
-        print("Photon command ingest on http://127.0.0.1:8766/operator-command")
-
-    if photon_client is not None and driver is not None and droid is not None:
-        from ground_station.agent.worker import DroidVoiceGateway
-        from ground_station.photon_inbound import InboundCommand, PhotonInbound
-
-        gateway = DroidVoiceGateway(droid, driver)
-
-        def on_command(cmd: InboundCommand) -> None:
-            if cmd.kind == "abort":
-                gateway.request_abort()
-            else:
-                gateway.request_start()
-
-        def ack(text: str, event_id: str) -> None:
-            photon_client.send_text(text, event_id)
-
-        inbound = PhotonInbound(photon_client, on_command=on_command, ack_text=ack)
-        inbound.start()
-        cleanup.callback(inbound.close)
-        if not inbound.ready.wait(60) or inbound.failed.is_set():
-            print("Photon inbound did not subscribe. No flight was started.")
-            return 1
+            ingest = PhoneCommandBridge(
+                PhoneCommandGateway(DroidVoiceGateway(droid, driver), driver),
+                token=args.bridge_settings.token, port=args.bridge_settings.port,
+            )
+            cleanup.callback(ingest.close)
+            try:
+                ingest.start()
+            except OSError:
+                print("Phone bridge could not bind loopback. No flight was started.")
+                return 1
+            if not ingest.ready.wait(3) or ingest.failed.is_set():
+                print("Phone bridge did not become ready. No flight was started.")
+                return 1
+            print(f"Phone commands ready on 127.0.0.1:{ingest.port}; "
+                  "phone start replaces y only after camera/battery preflight.")
 
     last_ok = time.time()
     bat = drone.battery()
@@ -416,7 +422,16 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
             if t0 - last_ok > FRAME_STALE_S:
                 frame = None
 
+            if t0 - bat_ts > 5:
+                bat = drone.battery()
+                bat_ts = t0
+            if ingest is not None and ingest.failed.is_set():
+                driver.stop()
             tick = mission.tick(frame, t0)
+            if args.phone_commands:
+                driver.approve_phone_start(
+                    flight_ready=frame is not None and not tick.stale and bat is not None and bat >= 20,
+                )
             snap = mission.snapshot()
             latch_mission_abort(driver, snap["phase"])
 
@@ -428,6 +443,11 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
                 if photon is not None:
                     photon.notify("land")
             elif not stopped and tick.action == "takeoff" and not flying:
+                if args.phone_commands and (tick.stale or frame is None or bat is None or bat < 20):
+                    driver.stop()
+                    continue
+                # A timed-out takeoff may still have reached the drone. Ensure
+                # the finally block attempts landing even without its ACK.
                 flying = True
                 drone.takeoff()
                 drone.hover()
@@ -466,10 +486,6 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
                     drone.hover()
                 else:
                     drone.send_rc(tick.lr, tick.fwd, tick.up, tick.yaw)
-
-            if t0 - bat_ts > 5:
-                bat = drone.battery()
-                bat_ts = t0
 
             pending = driver.snapshot()["pending_approval"] if driver is not None else None
             hint = (

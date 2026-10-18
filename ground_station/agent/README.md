@@ -49,7 +49,11 @@ Photon inbound text; start queues intent on `DroidVoiceGateway`, and emergency
 stop directly latches the host driver. Photon is not another mission authority.
 
 Real starts/photos require local `y` approval with a 60-second TTL.
-Starts also require camera/battery preflight. A queued request is
+The explicit authenticated phone bridge is the sole exception:
+a phone start replaces `y` for one survey after camera/battery preflight.
+Both processes must opt in on the drone-connected laptop; see [setup](../../SETUP.md#enable-the-same-laptop-bridge).
+`--phone-commands` waits for the phone, with no automatic survey.
+A queued request is
 not takeoff. One survey, two extra photos, 12 mission-tool calls per turn,
 16 turns, and a default 60-second model timeout remain in effect.
 The camera loop owns a fixed 90-second analysis deadline across all reimages.

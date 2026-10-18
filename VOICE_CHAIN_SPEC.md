@@ -4,7 +4,8 @@ Operator **activation** is not this file. That command chain is:
 
 ```
 voice on phone → iMessage (dictation or voice memo) → Photon inbound
-    → DroidVoiceGateway → Droid → local y approval → drone
+    → authenticated opt-in same-laptop bridge → DroidVoiceGateway → Droid
+    → one-shot phone start authorization + camera/battery preflight → drone
 ```
 
 This spec is the **separate data stream** for field PCM from the UNO Q. That
@@ -14,7 +15,8 @@ mic failure is not confused with Photon command ingress or Droid.
 ## Command chain (activation)
 
 Phone is the microphone. Photon is the pipe. Droid queues intent. Host
-approves. See `SETUP.md` and `AGENTS.md`.
+approves. Phone ingress is off by default and only accepts exact start/abort/land
+utterances. See `SETUP.md` and `AGENTS.md` for both process opt-ins and the shared token.
 
 ## Data chain overview (this spec)
 
@@ -160,8 +162,10 @@ while `sensor_recv` runs locally. The UNO Q Python code runs unmodified.
 
 ## Non-goals / safety invariants (unchanged)
 
-- No flight without `--allow-real-flight` + local `y` approval. Phone → Photon
-  is the activation command chain; this UNO Q path is data only.
+- No real flight without `--allow-real-flight` plus local `y` or explicit
+  authenticated phone start authorization after preflight. Phone → Photon
+  is the activation command chain; this UNO Q path is data only and cannot
+  supply phone authorization.
 - Space/q and `driver.stop()` stay the hard stops; a transcript that says
   "resume" after stop is data, not a resume command (stopped missions do not
   resume — AGENTS.md).

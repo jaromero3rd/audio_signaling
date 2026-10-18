@@ -8,7 +8,6 @@
 | Mission reasoning and crop-health image input | Persistent Factory Droid SDK session |
 | Field data stream | Drone/camera/sensors → host → optional Droid score + Chalk → store |
 | Data-chain alerts and spoken summaries | Photon outbound + ElevenLabs TTS voice notes |
-| Laptop voice fallback | ElevenAgents client tools on the ground laptop |
 | Optional crop decision features | Chalk; local thresholds otherwise |
 | Per-frame detection, RC, hardware and emergency stop | Local Python host |
 
@@ -19,8 +18,8 @@ attachment, not a call. No telephony provider is part of this architecture.
 
 `demo.py` calls `ground_station.voice_mission.main()`. The default is a webcam
 mock unless `--allow-real-flight` is explicit. Droid owns high-level decisions
-even with `--no-voice`; that flag never grants real-hardware approval.
-The legacy direct voice/auto controller is no longer supported.
+without laptop voice. `--no-voice` is a legacy no-op and never grants approval.
+The legacy voice/auto controller is no longer supported.
 
 `DroidWorker` runs one `DroidController` in a background thread, serializing
 `Session.stream` turns. Operator activation is a **command chain** separate
@@ -29,12 +28,12 @@ from the **data stream**.
 Command chain: the operator speaks on the phone. iMessage dictation arrives as
 plain text on the Photon direct space; a voice memo arrives as audio on that
 same space and may be transcribed with ElevenLabs Scribe. The host maps an
-authorized inbound message onto `DroidVoiceGateway` (start queues intent,
-status reads a driver snapshot, abort latches host stop). Neither Photon nor
-Droid calls the drone adapter. Local `y` still approves real takeoff.
+authorized bounded command onto `DroidVoiceGateway` (start queues intent,
+abort/land latch host stop). Neither Photon nor Droid calls the drone adapter.
+Opt-in phone start replaces local `y` only after camera/battery preflight.
 
-Laptop ElevenAgents is a fallback on the same gateway. `--no-voice` skips
-laptop voice and does not disable Photon command ingress.
+Phone ingress requires explicit opt-in on both processes. Outbound Photon
+configuration alone never opens a mission command listener.
 
 The data stream never activates a flight. Default mode uses local
 AprilTag/YOLO detection, with no cloud crop diagnosis.
@@ -84,7 +83,8 @@ No validation requires network reconfiguration or hardware.
 Safety controls:
 
 - One survey and at most two extra photos per process.
-- Real start and extra-photo requests need local `y` approval; 60-second TTL.
+- Real starts/photos need local `y`; an opt-in authenticated phone start
+  supplies one-shot start authorization only. Approval TTL is 60 seconds.
 - Start approval also checks fresh video and battery.
 - Space latches stop; `q`/Escape stops and exits.
 - Capture queues, SDK turns and notification queues are bounded.
@@ -103,35 +103,29 @@ Authorized plain-text iMessages are command intent. iPhone dictation is text
 before Photon sees it. Voice memos are attachments on the same space.
 
 The host, not the model, decides which inbound messages become
-`DroidVoiceGateway.request_start`, `request_abort`, or a status snapshot.
+`DroidVoiceGateway.request_start` or `request_abort`.
 Queued start is never takeoff. Spacebar remains the fast emergency stop.
 The TypeScript agent in `photon-imessage-agent` is the Photon inbound
-bridge: authorized text is POSTed to loopback ingest (`DROID_COMMAND_URL`,
-default `http://127.0.0.1:8766/operator-command`) and mapped onto Droid.
-Run `bun start` there next to `demo.py` / `voice_mission`. It does not fly
-by itself; queued start is not takeoff.
+bridge: only exact start/abort/land utterances are POSTed as bounded JSON
+to `127.0.0.1:8787/command`, with a shared bearer token. Run it on the
+drone-connected laptop. Python `--phone-commands` and Bun
+`COMMAND_BRIDGE_ENABLED=true` are both required; default is no listener
+and no forwarding. `--phone-commands` waits rather than starts.
+Neither the old unauthenticated `operator_http` listener nor the standalone
+Python `PhotonInbound` subscriber is started. Only Bun subscribes for commands.
+
+The original Photon receipt time must be within 30 seconds, with 5 seconds
+future skew. Python rechecks timestamps, exact schema and ID, authenticates
+with constant-time comparison, limits bodies to 1 KiB and deduplicates up
+to 256 expiring receipts. Bun uses a 2.5-second timeout and no redirects.
+The host authorizes one start for 60 seconds and the camera loop consumes it
+only after fresh video and battery ≥ 20%; real extra photos still need `y`.
+Abort/land latch stop without a Droid turn and revoke outstanding starts.
+Receipts are not a durable command queue; no automatic flight resumes.
+See [setup](SETUP.md#enable-the-same-laptop-bridge).
 
 Field PCM from the UNO Q (`sensor_recv` `/mic`) is **data**, not activation.
 See [VOICE_CHAIN_SPEC.md](VOICE_CHAIN_SPEC.md).
-
-## Laptop ElevenAgents fallback
-
-`voice_eleven.py` uses the pinned ElevenLabs SDK, an authenticated private
-dashboard agent and three locally registered client tools:
-`start_survey`, `get_mission_status`, `abort_mission`.
-Unexpected tool parameters are rejected. The bridge accepts only a
-`DroidVoiceGateway`, not a direct mission object.
-
-`SoundDeviceAudio` reuses callback-based mic/speaker plumbing at the SDK's
-16 kHz signed PCM16 mono format. A bounded mic queue moves network sends off
-the sounddevice callback. Output buffering preserves partial chunks and
-supports interruption. Readiness is signaled only once audio starts, after the
-SDK has connected. Startup failures and shutdown close streams.
-
-The dashboard must declare matching client tools, PCM input/output, Scribe
-transcription, an ElevenLabs voice, and permit the runtime safety-prompt override.
-See [SETUP.md](SETUP.md). Contextual updates are labeled untrusted and do not
-impersonate new operator requests. Queued start never means takeoff.
 
 ## Data chain: Photon outbound and voice notes
 
@@ -201,7 +195,7 @@ python -m unittest discover -s tests -v
 
 Default tests use fakes only. They cover the actual worker/mission/driver,
 image attachments and strict output, no-narration/stale/stop gates, approvals,
-budgets, credential suppression, fake ElevenAgents/audio, TTS HTTP and Photon
+budgets, credential suppression, authenticated phone ingress, TTS HTTP and Photon
 multipart/retry/dedupe/urgency. They open no devices and send nothing.
 
 `tests/live_droid_pipeline.py` is separately opt-in and billable: a generated
