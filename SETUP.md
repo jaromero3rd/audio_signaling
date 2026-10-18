@@ -59,7 +59,17 @@ with Path(".env.phone-command").open("x") as file:
 PY
 ```
 
-In two terminals on the drone-connected laptop:
+Default one-liner (single command, waits indefinitely for Photon):
+
+```bash
+./activate --mock --photon
+./activate --allow-real-flight --photon --auto
+./activate --mock --photon --auto --crop-analysis --field-id field-1
+```
+
+`--photon` implies `--phone-commands` and auto-launches the Bun agent on the same laptop (same token/port). Without `--photon`, `activate` exits with a warning (no indefinite wait with no source). `activate` also works as `python -m ground_station.activate`.
+
+In two terminals on the drone-connected laptop (legacy):
 
 ```bash
 # Repository root: webcam mock, no Python outbound notifications

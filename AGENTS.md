@@ -27,6 +27,11 @@ ElevenLabs Scribe. The host maps authorized inbound messages onto
 Phone ingress is off by default: Python needs `--phone-commands`,
 Bun needs `COMMAND_BRIDGE_ENABLED=true`, and both need the same private
 `COMMAND_BRIDGE_TOKEN`. Both processes run on the drone-connected laptop.
+`./activate --photon` is the default one-liner: it implies `--phone-commands`,
+auto-launches the Bun agent on the same laptop, validates `PHOTON_*` + token
+before opening drone/video, tees `[photon]/[mission]` logs, and waits
+indefinitely for Photon iMessages; without `--photon` it warns and exits.
+Also available as `python -m ground_station.activate`.
 Only exact start/abort/land commands reach authenticated `127.0.0.1:8787/command`;
 the legacy unauthenticated listener and Python `PhotonInbound` are not started.
 Default mode uses local AprilTag/YOLO steering, with no cloud crop analysis.

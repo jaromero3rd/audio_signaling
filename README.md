@@ -66,6 +66,15 @@ Use Python 3.10+ and install `requirements.txt`. Authenticate the local `droid`
 CLI. Copy `.env.example` privately and follow [SETUP.md](SETUP.md) to configure
 Photon (inbound commands + outbound alerts).
 
+Default one-liner (arms and waits indefinitely for Photon):
+
+```bash
+./activate --mock --photon
+./activate --allow-real-flight --photon --auto --crop-analysis --field-id field-1
+```
+
+`--photon` implies `--phone-commands` and auto-launches the Bun agent. Without it, `activate` warns and exits.
+
 Offline, fake-only validation, with no model calls, messages, camera, or drone:
 
 ```bash

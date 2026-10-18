@@ -218,7 +218,7 @@ def main() -> int:
         args.weights = resolve_weights(args.weights)
     if args.controller == "droid" and not args.allow_real_flight:
         args.mock = True
-    if args.controller == "droid" and args.auto:
+    if args.controller == "droid" and args.auto and not args.phone_commands:
         print("Droid mode does not allow --auto; survey starts use Photon text or the controlled tool.")
         return 1
     if args.fake_analysis and not args.mock:
