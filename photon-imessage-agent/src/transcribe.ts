@@ -13,6 +13,7 @@ export async function transcribeAudio(blob: Blob, filename: string, apiKey: stri
     method: "POST",
     headers: { "xi-api-key": key },
     body,
+    signal: AbortSignal.timeout(20_000),
   });
   if (!response.ok) throw new Error(`ElevenLabs speech-to-text HTTP ${response.status}`);
   const payload = await response.json() as { text?: unknown };

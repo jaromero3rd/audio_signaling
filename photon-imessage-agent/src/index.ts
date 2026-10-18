@@ -202,7 +202,7 @@ async function main() {
           : undefined;
       if (input) {
         console.info(audio
-          ? "Inbound voice memo matched; transcribed then sent to Droid."
+          ? "Inbound voice memo matched; sending host reply."
           : "Inbound iMessage matched; forwarding the command to Droid.");
         const sent = await photon.projects.sendMessage(input);
         if (typeof sent.id !== "string" || !/^pho_msg_[0-7][0-9a-hjkmnp-tv-z]{25}$/.test(sent.id)) {
