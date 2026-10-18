@@ -5,21 +5,20 @@
 | Concern | Provider |
 | --- | --- |
 | Mission decisions and crop-health image analysis | One persistent Factory Droid SDK session, native images |
-| Operator speech and spoken replies | ElevenAgents, Scribe + ElevenLabs TTS configured in dashboard |
-| User text, image/audio attachments | Photon direct iMessage space |
+| Operator mission commands | Photon inbound iMessage (text → start/abort intent) |
+| Outbound status / analysis alerts | Photon direct iMessage space (optional ElevenLabs TTS) |
 | Optional feature evaluation | Chalk, unchanged local thresholds otherwise |
 
-Photon cannot place calls. An urgent notification is URGENT text plus a voice
-note, not telephony. No separate image-analysis provider is used.
+Photon cannot place calls. An urgent notification is URGENT text plus an
+optional voice note, not telephony. No ElevenAgents voice command path.
 
 ## How Droid is used at runtime
 
 `demo.py` delegates to `voice_mission.main()`. `DroidWorker` owns a
 `DroidController` and one long-lived SDK `Session` off the camera/RC thread.
-Startup queues an initial instruction. ElevenAgents starts queue intent through
+Startup waits for Photon inbound text. Photon start queues intent through
 `DroidVoiceGateway`; abort bypasses model latency and stops immediately.
 Default mode uses local AprilTag/YOLO steering, with no cloud crop analysis.
-`--no-voice` asks Droid for one survey and does not bypass local approval.
 
 With `--crop-analysis`, the pipeline attaches the captured image in the same
 persistent session using `session.stream(..., images=[Image.from_bytes(...)])`.
@@ -73,14 +72,14 @@ This is not an OS sandbox.
 
 Photon host events: acknowledged takeoff/landing, saved photo, completion,
 abort and controller failure. Droid explicitly requests analysis alerts.
-Critical alerts (score < 0.4 or critical Chalk flag) get URGENT text and
-ElevenLabs Flash v2.5 MP3; others get text unless `--voice-notes` requests audio.
-TTS limits: 3,500 text characters, 5 MiB audio, in memory only.
-Failed/missing TTS does not block text. Photon upload uses multipart/related,
-content-hash idempotency/dedupe and bounded attachment-not-ready retry.
-Acceptance is not delivery; the queue is not durable.
-Crop summaries send the captured JPEG; incoming Photon mission commands are
-not wired.
+Critical alerts (score < 0.4 or critical Chalk flag) get URGENT text and,
+when TTS is configured, ElevenLabs Flash v2.5 MP3; others get text unless
+`--voice-notes` requests audio. TTS limits: 3,500 text characters, 5 MiB audio,
+in memory only. Failed/missing TTS does not block text. Photon upload uses
+multipart/related, content-hash idempotency/dedupe and bounded
+attachment-not-ready retry. Acceptance is not delivery; the queue is not durable.
+Crop summaries send the captured JPEG. Photon inbound text (`survey` / `abort`)
+queues Droid intent via `PhotonInbound` → `DroidVoiceGateway`.
 
 The active pipeline writes `data/surveys.sqlite3` locally. Optional
 `--chalk` uses the existing named query and fails closed on configured errors.
@@ -90,12 +89,11 @@ automatically.
 
 ## Setup and validation
 
-See `SETUP.md` for dashboard client-tool declarations, Scribe/TTS, PCM16 mono
-16 kHz, safety-prompt override and credentials:
-`ELEVENLABS_API_KEY`, `ELEVENLABS_AGENT_ID`, `ELEVENLABS_TTS_VOICE_ID`.
-Photon needs its existing project/assignment, agent/user handles and direct
-space. Chalk is optional. Local Droid sign-in suffices unless headless auth
-needs `FACTORY_API_KEY`. Never print or commit keys.
+See `SETUP.md` for Photon project/assignment, agent/user handles and direct
+space (required for iMessage commands). Optional alert TTS:
+`ELEVENLABS_API_KEY`, `ELEVENLABS_TTS_VOICE_ID`. Chalk is optional. Local Droid
+sign-in suffices unless headless auth needs `FACTORY_API_KEY`. Never print or
+commit keys.
 
 ```sh
 python -m unittest discover -s tests -v

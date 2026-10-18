@@ -8,14 +8,19 @@ import queue
 import threading
 
 import httpx
+import numpy as np
 import sounddevice as sd
 from elevenlabs.client import ElevenLabs
 from elevenlabs.conversational_ai.conversation import (
-    AudioInterface, ClientTools, Conversation, ConversationInitiationData,
+    AudioInterface, ClientTools, Conversation,
 )
 
+# ElevenAgents expects 16 kHz PCM16 mono. Laptop ALSA often only opens at 48 kHz.
 RATE = 16000
-CHUNK = 4000
+HOST_RATE = 48000
+_RESAMPLE = HOST_RATE // RATE  # 3
+CHUNK = 4000  # samples at 16 kHz (~250 ms)
+HOST_CHUNK = CHUNK * _RESAMPLE
 INSTRUCTIONS = """You are AgriDrone's voice command interface on the ground laptop.
 For survey wheat, find crop, start drone or go fly, call start_survey once.
 It ONLY queues intent to Factory Droid. Queued is not executed. Never claim takeoff.
@@ -49,14 +54,29 @@ class SoundDeviceAudio(AudioInterface):
 
     def _start(self, input_callback):
         try:
-            self._input = sd.RawInputStream(
-                samplerate=RATE, blocksize=CHUNK, channels=1,
-                dtype="int16", callback=self._mic_cb,
-            )
-            self._output = sd.RawOutputStream(
-                samplerate=RATE, blocksize=CHUNK, channels=1,
-                dtype="int16", callback=self._spk_cb,
-            )
+            # Prefer native 48 kHz; fall back to 16 kHz if the device allows it.
+            try:
+                self._host_rate = HOST_RATE
+                self._host_chunk = HOST_CHUNK
+                self._input = sd.RawInputStream(
+                    samplerate=HOST_RATE, blocksize=HOST_CHUNK, channels=1,
+                    dtype="int16", callback=self._mic_cb,
+                )
+                self._output = sd.RawOutputStream(
+                    samplerate=HOST_RATE, blocksize=HOST_CHUNK, channels=1,
+                    dtype="int16", callback=self._spk_cb,
+                )
+            except Exception:
+                self._host_rate = RATE
+                self._host_chunk = CHUNK
+                self._input = sd.RawInputStream(
+                    samplerate=RATE, blocksize=CHUNK, channels=1,
+                    dtype="int16", callback=self._mic_cb,
+                )
+                self._output = sd.RawOutputStream(
+                    samplerate=RATE, blocksize=CHUNK, channels=1,
+                    dtype="int16", callback=self._spk_cb,
+                )
             self._input.start()
             self._output.start()
             self._pump = threading.Thread(target=self._pump_mic, args=(input_callback,), daemon=True)
@@ -66,10 +86,29 @@ class SoundDeviceAudio(AudioInterface):
             self.stop()
             raise
 
+    def _down_to_16k(self, pcm16: bytes) -> bytes:
+        if self._host_rate == RATE:
+            return pcm16
+        samples = np.frombuffer(pcm16, dtype=np.int16)
+        return samples[::_RESAMPLE].tobytes()
+
+    def _up_from_16k(self, pcm16: bytes, host_frames: int) -> bytes:
+        if self._host_rate == RATE:
+            need = host_frames * 2
+            return pcm16[:need] + b"\0" * max(0, need - len(pcm16))
+        samples = np.frombuffer(pcm16, dtype=np.int16)
+        if samples.size == 0:
+            return b"\0" * (host_frames * 2)
+        up = np.repeat(samples, _RESAMPLE)
+        need = host_frames
+        if up.size < need:
+            up = np.pad(up, (0, need - up.size))
+        return up[:need].astype(np.int16).tobytes()
+
     def _mic_cb(self, indata, frames, time_info, status):
         if not self._stopped.is_set():
             try:
-                self._in_q.put_nowait(bytes(indata))
+                self._in_q.put_nowait(self._down_to_16k(bytes(indata)))
             except queue.Full:
                 pass
 
@@ -83,11 +122,14 @@ class SoundDeviceAudio(AudioInterface):
                 callback(data)
 
     def _spk_cb(self, outdata, frames, time_info, status):
-        need = frames * 2
+        # Pull 16 kHz PCM from the queue buffer, then upsample for the device.
+        need_16 = (frames // _RESAMPLE) * 2 if self._host_rate != RATE else frames * 2
+        if self._host_rate == RATE:
+            need_16 = frames * 2
         with self._out_lock:
-            chunk = bytes(self._out[:need])
-            del self._out[:need]
-        outdata[:] = chunk + b"\0" * (need - len(chunk))
+            chunk16 = bytes(self._out[:need_16])
+            del self._out[:need_16]
+        outdata[:] = self._up_from_16k(chunk16, frames)
 
     def output(self, audio):
         with self._out_lock:
@@ -156,12 +198,10 @@ class ElevenVoiceBridge:
         http = httpx.Client(timeout=15, follow_redirects=False, trust_env=False)
         try:
             client = self._client_factory(api_key=self.key, httpx_client=http)
+            # Dashboard agent prompt wins — many agents disallow prompt override (WS 1008).
             self._conversation = self._conversation_factory(
                 client, self.agent_id, requires_auth=True,
                 audio_interface=self.audio, client_tools=self.tools,
-                config=ConversationInitiationData(conversation_config_override={
-                    "agent": {"prompt": {"prompt": INSTRUCTIONS}},
-                }),
             )
             if not self._closing.is_set():
                 self._conversation.start_session()

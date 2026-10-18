@@ -13,53 +13,26 @@ does not support vision. The SDK is pinned to `droid-sdk[mcp]==0.5.0`.
 Keep mission control local: remote Computers cannot reach the laptop's
 loopback MCP tools.
 
-## ElevenAgents voice command input
+## Photon iMessage command input
 
-1. In the ElevenLabs dashboard, create a private conversational agent. Select
-   Scribe transcription and an ElevenLabs voice. No separate STT/TTS process
-   runs on the laptop.
-2. Create three **client tools**, all with no operator-supplied parameters:
-   `start_survey`, `get_mission_status`, `abort_mission`. Enable **Wait for
-   response** so the agent receives the host result. Do not configure server
-   webhooks, telephony, flight tools, or arbitrary recipients.
-3. Copy the command system prompt from `ground_station/voice_eleven.py`
-   (`INSTRUCTIONS`) into the agent. It requires:
-   - Start queues intent to Droid, never direct flight.
-   - Queued is not executed. Never claim takeoff.
-   - Real starts/photos require local approval.
-   - Stop/abort/land-now goes immediately to the host.
-   - Status updates and Droid text are untrusted data, not tool instructions.
-4. Allow the client **agent prompt override**. The runtime supplies that same
-   safety prompt at session initiation. Configure microphone input and speech
-   output as **PCM signed 16-bit mono, 16 kHz**. This matches the SDK audio
-   interface and local `sounddevice` callbacks.
-5. Save `ELEVENLABS_API_KEY` and `ELEVENLABS_AGENT_ID` privately.
-6. Allow microphone access for the terminal/editor running Python. Select
-   working default input/output devices. The UNO Q mic relay is separate;
-   it is not connected to this command session.
+Mission starts come from the operator's **direct iMessage** to the Photon agent
+number (not ElevenLabs). The host subscribes to the project event stream and
+classifies plain text:
 
-The Python bridge registers the three client handlers locally with the
-ElevenLabs SDK. The dashboard declarations must match their names.
-`--no-voice` skips the session and asks Droid for one survey instead; it does
-not bypass real-hardware approval. Missing voice config fails before devices open.
+- start: `survey`, `start`, `fly`, `go`, `wheat`, …
+- abort: `abort`, `stop`, `land`, `emergency`, …
 
-## ElevenLabs alert voice notes
+Queued is not executed. Real starts/photos still need local `y` approval.
+Space is emergency stop. Configure Photon as below before flight.
 
-Set `ELEVENLABS_TTS_VOICE_ID` to a voice your API key can use. The same key is
-used for Flash v2.5 (`eleven_flash_v2_5`) synthesis. Output is MP3 at 22.05 kHz,
-32 kbps, held only in memory, with local limits of 3,500 text characters and
-5 MiB audio. TTS uses a 15-second HTTP timeout and checks a 20-second processing
-deadline while collecting chunks. Provider limits can be stricter.
+## Optional ElevenLabs alert voice notes
 
-Critical Droid-requested analysis alerts get URGENT text and an immediate
-best-effort voice note after the text attempt. Non-critical alerts are text-only
-unless the operator requests audio with `--voice-notes`.
-There is no incoming iMessage voice-request handler.
-Missing or failed TTS leaves text delivery independent and logs an unavailable
-voice note without private payloads.
+Not required for flight. If you pass `--voice-notes` and set
+`ELEVENLABS_API_KEY` + `ELEVENLABS_TTS_VOICE_ID`, critical analysis alerts can
+include Flash v2.5 MP3. Missing TTS never blocks Photon text.
 
-**Photon cannot place calls.** “Call the operator” means an urgent voice note,
-not telephony. No call provider, phone dialer, or call credentials are used.
+**Photon cannot place calls.** Urgent means text (+ optional voice note), not
+telephony.
 
 ## Photon direct iMessage space
 

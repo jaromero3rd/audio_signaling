@@ -201,5 +201,42 @@ class PhotonTests(unittest.TestCase):
         self.assertEqual(attempts[0], attempts[1])
 
 
+class PhotonInboundTests(unittest.TestCase):
+    def test_classify_start_and_abort(self):
+        from ground_station.photon_inbound import classify_text
+
+        self.assertEqual(classify_text("survey the wheat"), "start")
+        self.assertEqual(classify_text("please abort now"), "abort")
+        self.assertEqual(classify_text("land"), "abort")
+        self.assertIsNone(classify_text("how's the weather"))
+
+    def test_parse_authorized_direct_text(self):
+        from ground_station.photon_inbound import parse_inbound
+
+        project, agent, user = rid("prj"), "+15550000001", "+15550000002"
+        mid = rid("msg")
+        event = {
+            "type": "message.received",
+            "source": "imessage.photon",
+            "data": {
+                "projectId": project,
+                "object": {
+                    "id": mid,
+                    "projectId": project,
+                    "platform": "imessage",
+                    "status": "received",
+                    "sentBy": {"kind": "human", "handle": user},
+                    "receivedBy": {"kind": "agent", "handle": agent},
+                    "space": {"kind": "direct"},
+                    "content": {"type": "text", "format": "plain", "text": "start survey"},
+                },
+            },
+        }
+        cmd = parse_inbound(event, project=project, agent=agent, user=user)
+        self.assertIsNotNone(cmd)
+        self.assertEqual(cmd.kind, "start")
+        self.assertEqual(cmd.message_id, mid)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,12 +41,12 @@ It never replaces failed real analysis.
 
 ## Gates and lifecycle
 
-`DroidWorker` serializes turns off the camera/RC thread. Startup queues an
-instruction, voice starts queue intent, and emergency stop directly latches
-the host driver. ElevenAgents is not another mission authority.
+`DroidWorker` serializes turns off the camera/RC thread. Startup waits for
+Photon inbound text; start queues intent, and emergency stop directly latches
+the host driver. Photon is not another mission authority.
 
-Real starts/photos require local `y` approval with a 60-second TTL, including
-`--no-voice`. Starts also require camera/battery preflight. A queued request is
+Real starts/photos require local `y` approval with a 60-second TTL.
+Starts also require camera/battery preflight. A queued request is
 not takeoff. One survey, two extra photos, 12 mission-tool calls per turn,
 16 turns, and a default 60-second model timeout remain in effect.
 The camera loop owns a fixed 90-second analysis deadline across all reimages.
@@ -65,8 +65,8 @@ effective tool inventory. This is a tool-policy boundary, **not an OS sandbox**.
 The CLI runs in a temporary directory. Photon, ElevenLabs (`ELEVENLABS_`),
 Chalk and other service credentials are suppressed in its environment.
 Factory authentication remains available. Native image bytes and validated
-observations go to Factory; speech goes to ElevenLabs; formatted alerts/audio
-go to Photon. Model summaries and history remain untrusted data.
+observations go to Factory; formatted alerts/audio go to Photon. Model
+summaries and history remain untrusted data.
 
 ## Features and persistence
 
@@ -107,7 +107,7 @@ incoming Photon mission commands are not implemented.
 python -m unittest discover -s tests -v
 ```
 
-This uses fake SDK sessions, fake ElevenAgents/audio, in-memory TTS/Photon HTTP
+This uses fake SDK sessions, in-memory TTS/Photon HTTP
 responses and fake hardware. No live credentials are needed.
 
 `python tests/live_droid_pipeline.py` is a separately authorized Factory smoke

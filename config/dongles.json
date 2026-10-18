@@ -2,6 +2,15 @@
   "description": "USB WiFi dongle -> Tello map (dongle 7 is the default for demo.py).",
   "dongles": [
     {
+      "number": 6,
+      "iface": "wlx6c4cbce335cf",
+      "mac": "6c:4c:bc:e3:35:cf",
+      "drone": "TELLO-6",
+      "ssid": "TELLO-FE2950",
+      "video_port": 17006,
+      "note": "drone 6 stick; live SSID TELLO-FE2950 (QR→QR tag-12 dual)"
+    },
+    {
       "number": 7,
       "iface": "wlx6c4cbce344fc",
       "mac": "6c:4c:bc:e3:44:fc",

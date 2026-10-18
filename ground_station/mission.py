@@ -78,8 +78,16 @@ class Tick:
 
 def _make_target_detector(kind: str, family: str, target_tag: int | None, weights: Path):
     if kind == "wheat":
+        import os
+
         from ground_station.vision import HsvWheatDetector, YoloWheatHeadDetector
 
+        # Factory e2b (or any) ONNX server — set by scripts/wheat_e2b_up.sh
+        remote = os.environ.get("WHEAT_INFER_URL", "").strip()
+        if remote:
+            from ground_station.remote_wheat import RemoteWheatHeadDetector
+
+            return RemoteWheatHeadDetector(url=remote)
         if weights.is_file():
             return YoloWheatHeadDetector(weights=weights)
         print(f"no {weights}; wheat target: HSV color detector (computer test)")
