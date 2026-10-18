@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Demo entry: Factory Droid high-level control; local vision + RC.
+"""Demo entry: Photon iMessage commands → Factory Droid; local vision + RC.
 
 Default radios: Mac Wi-Fi → Tello; USB phone hotspot → internet + Uno Q.
 
-AprilTag/YOLO steer on the laptop. Droid SDK session issues start/land (etc.)
-via MCP tools — frames are NOT uploaded to Factory for detection.
-Optional --crop-analysis attaches the survey photo to the same Droid session.
+AprilTag/YOLO steer on the laptop. Photon text queues start/abort to Droid.
+Optional --crop-analysis attaches the survey JPEG to the same Factory session.
 """
 
 from __future__ import annotations

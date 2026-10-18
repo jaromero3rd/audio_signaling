@@ -1,40 +1,36 @@
-# AgriDrone: Voice-Directed Field Surveys
+# AgriDrone: Photon-Directed Field Surveys
 
 A prototype with two independent chains: operator activation over iMessage, and
 a field data stream for photos, telemetry, and crop summaries.
 
 | Concern | Provider |
 | --- | --- |
-| Operator activation (command chain) | Voice on the phone → iMessage → Photon inbound → DroidVoiceGateway → Droid |
+| Operator activation (command chain) | Phone iMessage → Photon inbound → DroidVoiceGateway → Droid |
 | Mission decisions and crop-health image analysis | One persistent Factory Droid SDK session, native image input |
 | Field data stream | Drone/camera/sensors → host → optional Droid score + Chalk weather → store |
-| Data-chain alerts back to the operator | Photon outbound: text, survey JPEG, ElevenLabs voice note |
+| Data-chain alerts back to the operator | Photon outbound: text, survey JPEG, optional ElevenLabs voice note |
 | Optional decision features | Chalk, or explicitly labeled local thresholds |
 
 The command chain activates the mission. The data stream never starts a flight.
-Laptop ElevenAgents is a local fallback when `--no-voice` is omitted and Photon
-command ingress is not used. `--no-voice` asks Droid for one survey from the host.
+No ElevenAgents voice command path.
 
 **Photon cannot place calls.** An urgent alert is text marked URGENT plus an
-audio attachment, not a telephone call. No telephony integration is used.
+optional audio attachment, not a telephone call. No telephony integration is used.
 Crop-health scores are uncertain visual estimates, not verified diagnoses.
 
 ## Command chain (activate)
 
 ```text
-operator voice on phone
-    → iMessage (dictation text or voice memo)
+operator iMessage text (or phone dictation → text)
     → Photon direct space (inbound)
-    → ground station maps authorized text to DroidVoiceGateway
+    → PhotonInbound / operator HTTP ingest → DroidVoiceGateway
     → persistent Droid queues start_survey
     → local y approval
     → drone adapter takeoff
 ```
 
-iPhone dictation is already text; that text is the command. A voice memo is
-audio on the same Photon space; the host may transcribe it with ElevenLabs
-Scribe before the same gateway. Spacebar on the laptop remains the fast stop.
-An iMessage abort is slower than local stop.
+Spacebar on the laptop remains the fast stop. An iMessage abort is slower than
+local stop.
 
 ## Data stream (separate)
 
@@ -51,48 +47,46 @@ AprilTag/YOLO steer locally. `--crop-analysis` enables the image turn and a
 fixed 90-second hover deadline. Reimages do not renew that deadline.
 After accepting the Droid score, crop analysis joins it with live NOAA/NASA
 weather through Chalk, stores the joined record when `CHALK_CLIENT_ID` is set,
-and sends the insight, JPEG, and an ElevenLabs clip through Photon outbound.
+and sends the insight and JPEG through Photon (optional ElevenLabs clip).
 Invalid JSON, a failed model turn, or narration without a decision stops the
 mission and requests landing. Emergency stop bypasses cloud latency.
 
 Image decisions and alerts are staged until the final assessment validates.
 The host controls paths, recipients, alert formatting, limits, and approvals.
-Real starts and extra photos require local `y` approval, including `--no-voice`.
+Real starts and extra photos require local `y` approval.
 Only the camera loop calls hardware. `--allow-real-flight` is also required.
 
 ## Setup and safe checks
 
 Use Python 3.10+ and install `requirements.txt`. Authenticate the local `droid`
 CLI. Copy `.env.example` privately and follow [SETUP.md](SETUP.md) to configure
-the ElevenLabs dashboard agent and optional Photon direct space.
+Photon (inbound commands + outbound alerts).
 
-Offline, fake-only validation, with no model calls, messages, audio devices,
-camera, or drone:
+Offline, fake-only validation, with no model calls, messages, camera, or drone:
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-Webcam demo with real Factory inference but no voice or messages:
+Webcam demo with real Factory inference but no messages:
 
 ```bash
 python demo.py --mock --target tag --target-tag 12 --home-tag 12 \
-  --fake-analysis --no-voice --no-photon
+  --fake-analysis --no-photon
 ```
 
 `--fake-analysis` is explicitly simulated and forbidden on real hardware.
 It is not a fallback for a failed model. A webcam demo is not a headless test.
 
-Photon credentials enable **real iMessages even in mock mode**, labeled MOCK.
-Keep `--no-photon` for local-only runs. The same direct space is command
-ingress (phone → Photon → Droid) and data-chain egress (survey text/JPEG/audio).
-To enable native image analysis on the data stream, replace `--fake-analysis`
-with `--crop-analysis`. Both use the same persistent Droid session.
+With Photon configured, text the agent `survey` / `abort`. To enable native
+image analysis, replace `--fake-analysis` with `--crop-analysis`.
+Both use the same persistent Droid session. Wheat poster YOLO (320 ONNX):
+`--target wheat --wheat-model poster`.
 
-Laptop ElevenAgents remains a local fallback when you omit `--no-voice`.
-Critical analysis alerts requested by Droid get text plus a voice note when
-TTS is configured. Non-critical alerts are text-only unless the operator
-passes `--voice-notes`.
+Photon credentials enable **real iMessages even in mock mode**, labeled MOCK.
+Keep `--no-photon` for local-only runs. Critical analysis alerts requested by
+Droid get text plus a voice note when TTS is configured. Non-critical alerts
+are text-only unless the operator passes `--voice-notes`.
 
 The authenticated smoke test is opt-in:
 
@@ -112,13 +106,9 @@ ElevenLabs transports and no hardware. It is not part of fake-only validation.
 - Voice notes: in-memory MP3, Flash v2.5, at most 3,500 text characters / 5 MiB.
   Missing or failed TTS does not prevent the independent text attempt.
 - Notifications are best effort, not a durable outbox. Accepted is not delivered.
-- Photon upload supports image attachments; crop analysis sends its captured
-  JPEG with the weather insight and audio clip on the data chain.
-  Operator activation uses the same space inbound: phone voice → Photon → Droid.
 
-See the [runtime guide](ground_station/agent/README.md), [technical guide](README_TECHNICAL.md),
-and [requirements](prd.md). Local history is `data/surveys.sqlite3`; optional
-Chalk Volume helpers do not automatically resume flight.
+See [AGENTS.md](AGENTS.md), [runtime guide](ground_station/agent/README.md),
+[technical guide](README_TECHNICAL.md), and [requirements](prd.md).
 
 ## Field networking
 

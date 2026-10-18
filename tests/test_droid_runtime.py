@@ -26,20 +26,18 @@ class RuntimeTests(unittest.TestCase):
             self.assertNotIn("--mock", sys.argv)
 
     def test_unsafe_droid_flags_rejected_before_drone_construction(self):
-        for flags in ([], ["--mock", "--auto"]):
-            with patch.object(sys, "argv", ["demo", "--controller", "droid", "--no-photon", *flags]), \
-                 patch.object(voice_mission, "load_dotenv"), \
-                 patch.dict("os.environ", {"ELEVENLABS_API_KEY": "", "ELEVENLABS_AGENT_ID": ""}), \
-                 patch.object(voice_mission, "MockDrone") as mock, \
-                 patch.object(voice_mission, "TelloDrone") as tello:
-                self.assertEqual(voice_mission.main(), 1)
-                mock.assert_not_called()
-                tello.assert_not_called()
+        with patch.object(sys, "argv", ["demo", "--controller", "droid", "--no-photon", "--mock", "--auto"]), \
+             patch.object(voice_mission, "load_dotenv"), \
+             patch.object(voice_mission, "MockDrone") as mock, \
+             patch.object(voice_mission, "TelloDrone") as tello:
+            self.assertEqual(voice_mission.main(), 1)
+            mock.assert_not_called()
+            tello.assert_not_called()
 
     def environment(self, stack):
         stack.enter_context(patch.object(sys, "argv", [
             "demo", "--controller", "droid", "--mock", "--target", "tag", "--no-photon",
-            "--fake-analysis", "--no-voice",
+            "--fake-analysis",
         ]))
         stack.enter_context(patch.object(voice_mission, "load_dotenv"))
         drone = stack.enter_context(patch.object(voice_mission, "MockDrone")).return_value
@@ -86,25 +84,15 @@ class RuntimeTests(unittest.TestCase):
             drone.close.assert_called_once()
             tello.assert_not_called()
 
-    def test_default_voice_uses_elevenagents_with_droid_gateway(self):
+    def test_photon_disabled_requests_one_survey(self):
         with ExitStack() as stack:
             drone, tello, worker, factory = self.environment(stack)
-            sys.argv.remove("--no-voice")
-            stack.enter_context(patch.dict("os.environ", {
-                "ELEVENLABS_API_KEY": "test-only", "ELEVENLABS_AGENT_ID": "test-agent",
-            }))
-            bridge = MagicMock()
-            bridge.ready.wait.return_value = True
-            voice_factory = stack.enter_context(patch(
-                "ground_station.voice_eleven.start_voice_thread", return_value=bridge))
             self.assertEqual(voice_mission.main(), 0)
-            gateway = voice_factory.call_args.args[0]
-            self.assertTrue(gateway.controlled_by_droid)
-            self.assertIs(gateway.worker, worker)
-            bridge.close.assert_called_once()
+            start_prompt = worker.start.call_args.args[0]
+            self.assertIn("request one survey", start_prompt)
             tello.assert_not_called()
 
-    def test_no_voice_on_real_adapter_still_requires_local_approval(self):
+    def test_real_adapter_crop_analysis_still_requires_local_approval(self):
         with ExitStack() as stack:
             drone, tello, worker, factory = self.environment(stack)
             sys.argv.remove("--mock")

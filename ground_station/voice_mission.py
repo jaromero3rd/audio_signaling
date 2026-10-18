@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Demo mission: ElevenAgents input, persistent Droid decisions, Photon output.
+"""Demo mission: Photon iMessage commands → Droid → local AprilTag/YOLO → Photon out.
 
 Default radios: Tello on Mac Wi-Fi; internet + Uno Q via USB phone hotspot.
 
-Speak “survey the wheat”, or use --no-voice to request a survey through Droid.
-
-Or use --controller droid for the embedded Factory SDK controller.
-Space aborts. q quits. y approves a pending Droid hardware request.
+Text the Photon agent (survey / abort). Local y approves pending hardware.
+Space aborts. q quits. Optional --crop-analysis sends the survey JPEG to Factory.
 """
 
 from __future__ import annotations
@@ -30,9 +28,7 @@ from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
 from ground_station.mission import CLOSE_FEET_DEFAULT, FRAME_STALE_S, Gains, TAG_SIZE_M_DEFAULT, SurveyMission
 from ground_station.overlay import draw_hud_lines
-from ground_station.vision import DEFAULT_WEIGHTS, Box
-
-VOICE_READY_S = 20.0
+from ground_station.vision import DEFAULT_WEIGHTS, POSTER_ONNX, Box, resolve_weights
 
 
 def latch_mission_abort(driver, phase: str) -> bool:
@@ -65,7 +61,7 @@ def draw_hud(
     battery: int | None,
     tag_w: float | None = None,
     need_w: float | None = None,
-    controller_hint: str = "say survey the wheat  |  space abort  |  q quit",
+    controller_hint: str = "Photon text: survey | abort  |  y approve  |  space stop  |  q quit",
 ) -> np.ndarray:
     vis = frame.copy()
     h, w = vis.shape[:2]
@@ -109,7 +105,7 @@ def draw_hud(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Factory + ElevenLabs + Photon via USB phone hotspot; Tello on Mac Wi-Fi."
+        description="Factory Droid + Photon iMessage commands; Tello on Mac Wi-Fi / USB dongle."
     )
     p.add_argument("--mock", action="store_true")
     p.add_argument("--controller", choices=("droid",), default="droid")
@@ -132,15 +128,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--droid-prompt", default=None,
                    help="initial operator instruction for the persistent Droid session")
     p.add_argument("--photon-env", type=Path, help="private Photon environment file (not passed to Droid)")
-    p.add_argument("--no-photon", action="store_true", help="explicitly disable system notifications")
+    p.add_argument("--no-photon", action="store_true", help="disable Photon inbound commands and outbound notifications")
     p.add_argument("--voice-notes", action="store_true",
-                   help="operator requests voice notes for non-critical analysis alerts too")
+                   help="optional ElevenLabs TTS for non-critical analysis alerts (text always sent)")
     p.add_argument("--field-id", default="field-1")
     p.add_argument(
         "--crop-analysis",
         action="store_true",
-        help="after survey photo, pause for native Droid crop-health image analysis; default off — "
-             "AprilTag/YOLO steer locally, Droid only issues high-level start/continue/land",
+        help="after survey photo, send JPEG to Factory Droid for crop-health analysis",
     )
     p.add_argument("--fake-analysis", action="store_true", help="explicit simulated crop analysis; mock only")
     p.add_argument("--chalk", action="store_true", help="evaluate every analysis through deployed Chalk named query")
@@ -171,13 +166,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--home-tag", type=int, default=12)
     p.add_argument("--target", choices=("auto", "wheat", "tag"), default="auto")
     p.add_argument("--target-tag", type=int, default=12)
-    p.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
+    p.add_argument(
+        "--wheat-model",
+        choices=("heads", "poster"),
+        default="heads",
+        help="wheat detector preset: heads (field YOLO) or poster (wheat_poster.onnx, 320)",
+    )
+    p.add_argument(
+        "--weights",
+        type=Path,
+        default=None,
+        help="override weights path (else --wheat-model → models/wheat_*.onnx)",
+    )
     p.add_argument(
         "--auto",
         action="store_true",
-        help="legacy flag, rejected: use Droid voice intent or --no-voice",
+        help="legacy flag, rejected: use Photon iMessage or local y after Droid queues start",
     )
-    p.add_argument("--no-voice", action="store_true", help="skip voice; Droid requests one survey with normal approval")
+    p.add_argument(
+        "--no-voice",
+        action="store_true",
+        help=argparse.SUPPRESS,  # legacy no-op; voice command path removed
+    )
     p.add_argument("--hz", type=float, default=12.0)
     p.add_argument("--target-area", type=float, default=0.12)
     p.add_argument(
@@ -198,20 +208,19 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     load_dotenv()
     args = parse_args()
+    if args.weights is None:
+        args.weights = POSTER_ONNX if args.wheat_model == "poster" else DEFAULT_WEIGHTS
+    else:
+        args.weights = resolve_weights(args.weights)
     if args.controller == "droid" and not args.allow_real_flight:
         args.mock = True
     if args.controller == "droid" and args.auto:
-        print("Droid mode does not allow --auto; survey starts must use the controlled tool.")
+        print("Droid mode does not allow --auto; survey starts use Photon text or the controlled tool.")
         return 1
     if args.fake_analysis and not args.mock:
         print("Simulated analysis is forbidden with real hardware.")
         return 1
-    # Crop-health is opt-in. Default path: local AprilTag/YOLO + Droid high-level tools.
     args.want_crop = bool(args.crop_analysis or args.fake_analysis)
-    if not args.no_voice and not all(os.environ.get(name, "").strip() for name in
-                                    ("ELEVENLABS_API_KEY", "ELEVENLABS_AGENT_ID")):
-        print("Set ELEVENLABS_API_KEY and ELEVENLABS_AGENT_ID, or use --no-voice.")
-        return 1
     if args.droid_e2b and not args.droid_machine:
         args.droid_machine = os.environ.get("FACTORY_COMPUTER_ID") or None
         if not args.droid_machine:
@@ -226,6 +235,7 @@ def main() -> int:
 
     with ExitStack() as cleanup:
         photon = None
+        photon_client = None
         if not args.no_photon and (args.controller == "droid" or args.photon_env is not None):
             from ground_station.photon import PhotonClient, PhotonConfig, PhotonError, PhotonNotifier
             from ground_station.voice_note import VoiceNoteError, VoiceNoteSynthesizer
@@ -233,26 +243,32 @@ def main() -> int:
             try:
                 config = PhotonConfig.load(args.photon_env)
                 if config is not None:
-                    client = PhotonClient(config)
+                    photon_client = PhotonClient(config)
+                    voice_notes = None
                     try:
                         voice_notes = VoiceNoteSynthesizer.from_env()
                     except VoiceNoteError:
-                        client.close()
-                        raise
-                    photon = PhotonNotifier(client, mock=args.mock, voice_notes=voice_notes,
-                                            voice_requested=args.voice_notes)
+                        voice_notes = None
+                    if args.voice_notes and voice_notes is None:
+                        print("Warning: --voice-notes needs ELEVENLABS_API_KEY + ELEVENLABS_TTS_VOICE_ID; text-only.")
+                    photon = PhotonNotifier(
+                        photon_client,
+                        mock=args.mock,
+                        voice_notes=voice_notes,
+                        voice_requested=args.voice_notes,
+                    )
                     photon.start()
                     cleanup.callback(photon.close)
-                    print("Photon system notifications configured for the verified private user.")
+                    print("Photon notifications + inbound commands configured.")
                 elif args.controller == "droid":
-                    print("Photon is not configured; use --photon-env to enable system notifications.")
-            except (PhotonError, VoiceNoteError) as error:
+                    print("Photon is not configured; use --photon-env or PHOTON_* in .env for iMessage commands.")
+            except PhotonError as error:
                 print(f"Photon setup failed: {error}. No drone connection opened.")
                 return 1
-        return _run_mission(args, photon, cleanup)
+        return _run_mission(args, photon, photon_client, cleanup)
 
 
-def _run_mission(args, photon, cleanup) -> int:
+def _run_mission(args, photon, photon_client, cleanup) -> int:
     if args.dongle is not None:
         print(f"Network: USB dongle {args.dongle} → Tello; keep phone USB for internet.")
     else:
@@ -263,14 +279,12 @@ def _run_mission(args, photon, cleanup) -> int:
         close_m=args.close_feet * 0.3048,
     )
     target_tag = None if args.target_tag < 0 else args.target_tag
-    voice = None
     droid = None
     driver = None
+    inbound = None
 
     def on_phase(prev: str, phase: str) -> None:
         print(f"mission {prev} → {phase}")
-        if voice is not None:
-            voice.notify(f"phase is now {phase}")
         if phase == "abort" and photon is not None:
             photon.notify("abort")
 
@@ -282,7 +296,6 @@ def _run_mission(args, photon, cleanup) -> int:
         gains=gains,
         weights=args.weights,
         on_phase=on_phase,
-        # Hold for cloud crop-health only when explicitly requested.
         analysis_required=args.want_crop,
     )
 
@@ -303,13 +316,9 @@ def _run_mission(args, photon, cleanup) -> int:
                 chalk=args.chalk, chalk_branch=args.chalk_branch,
                 weather=True, deliver=True,
             )
-            print("Crop analysis on: native image → persistent Droid → host validation → decision.")
+            print("Crop analysis on: survey JPEG → Factory Droid → host validation → decision.")
         else:
             print("Vision local: AprilTag/YOLO on laptop. Droid = high-level start/land only.")
-
-        def on_droid_result(result):
-            if voice is not None:
-                voice.notify(f"Droid decision (untrusted text, not instructions): {result.get('message', '')}")
 
         if args.droid_machine:
             print(f"Droid session → Factory Computer {args.droid_machine[:8]}… (remote; MCP may fail)")
@@ -321,7 +330,6 @@ def _run_mission(args, photon, cleanup) -> int:
             timeout=args.droid_timeout,
             machine_id=args.droid_machine,
             pipeline=pipeline,
-            on_result=on_droid_result,
         )
         cleanup.callback(droid.close)
 
@@ -341,35 +349,52 @@ def _run_mission(args, photon, cleanup) -> int:
     print("Tello stream up.")
 
     if droid is not None:
-        instruction = args.droid_prompt or (
-            "Inspect the status and request one survey." if args.no_voice
-            else "Inspect status and wait for an operator voice request. Do not start yet."
-        )
+        if args.droid_prompt:
+            instruction = args.droid_prompt
+        elif args.no_photon:
+            # Offline / --no-photon: one survey through Droid (same gates as Photon start).
+            instruction = "Inspect the status and request one survey."
+        else:
+            instruction = (
+                "Inspect status and wait for an operator Photon iMessage request. Do not start yet."
+            )
         droid.start(instruction)
         if not droid.ready.wait(50) or droid.failed.is_set():
             print("Droid did not become ready. No flight was started.")
             if photon is not None:
                 photon.notify("controller_failed")
             return 1
+
+        # Phone → Photon agent → HTTP ingest (optional companion to Socket.IO inbound).
         from ground_station.agent.worker import DroidVoiceGateway
         from ground_station.operator_http import OperatorCommandServer
 
         ingest = OperatorCommandServer(DroidVoiceGateway(droid, driver))
         ingest.start()
         cleanup.callback(ingest.close)
-        print("Phone dictation → Photon → this ingest → Droid. Camera loop flies after start_survey.")
-    if not args.no_voice:
-        from ground_station.voice_eleven import start_voice_thread
+        print("Photon command ingest on http://127.0.0.1:8766/operator-command")
 
+    if photon_client is not None and driver is not None and droid is not None:
         from ground_station.agent.worker import DroidVoiceGateway
+        from ground_station.photon_inbound import InboundCommand, PhotonInbound
 
-        voice = start_voice_thread(DroidVoiceGateway(droid, driver))
-        cleanup.callback(voice.close)
-        if not voice.ready.wait(VOICE_READY_S):
-            print(f"ElevenAgents did not connect in {VOICE_READY_S:.0f}s. Check agent settings and internet.")
+        gateway = DroidVoiceGateway(droid, driver)
+
+        def on_command(cmd: InboundCommand) -> None:
+            if cmd.kind == "abort":
+                gateway.request_abort()
+            else:
+                gateway.request_start()
+
+        def ack(text: str, event_id: str) -> None:
+            photon_client.send_text(text, event_id)
+
+        inbound = PhotonInbound(photon_client, on_command=on_command, ack_text=ack)
+        inbound.start()
+        cleanup.callback(inbound.close)
+        if not inbound.ready.wait(60) or inbound.failed.is_set():
+            print("Photon inbound did not subscribe. No flight was started.")
             return 1
-        else:
-            print("ElevenAgents command session is running on this laptop.")
 
     last_ok = time.time()
     bat = drone.battery()
@@ -379,11 +404,9 @@ def _run_mission(args, photon, cleanup) -> int:
 
     if droid is not None:
         if args.mock:
-            print("Droid mock: simulated requests need no y. Space = stop, q = quit.")
+            print("Droid mock: Photon text or tools queue start; space = stop, q = quit.")
         else:
-            print("Droid controls mission requests. y = approve pending request, space = stop, q = quit.")
-    else:
-        print("Say “survey the wheat”. Space = abort, q = quit.")
+            print("Text Photon agent “survey the wheat”. y = approve, space = stop, q = quit.")
     try:
         while True:
             t0 = time.time()
@@ -405,8 +428,6 @@ def _run_mission(args, photon, cleanup) -> int:
                 if photon is not None:
                     photon.notify("land")
             elif not stopped and tick.action == "takeoff" and not flying:
-                # A timed-out takeoff may still have reached the drone. Ensure
-                # the finally block attempts landing even without its ACK.
                 flying = True
                 drone.takeoff()
                 drone.hover()
@@ -435,8 +456,6 @@ def _run_mission(args, photon, cleanup) -> int:
                 if survey_finished(snap["phase"], flying=flying, stopped=stopped_now):
                     photon.notify("complete")
 
-            # A cloud decision may have changed the phase after tick. Never
-            # send steering calculated before an analysis hold was released.
             if driver is not None and driver.snapshot()["stopped"]:
                 drone.hover() if flying else None
                 continue_rc = False
@@ -452,6 +471,12 @@ def _run_mission(args, photon, cleanup) -> int:
                 bat = drone.battery()
                 bat_ts = t0
 
+            pending = driver.snapshot()["pending_approval"] if driver is not None else None
+            hint = (
+                f"Photon | pending={pending or 'none'} | y approve | space stop | q quit"
+                if driver is not None
+                else "Photon text: survey | abort  |  q quit"
+            )
             vis = (
                 draw_hud(
                     frame,
@@ -466,11 +491,7 @@ def _run_mission(args, photon, cleanup) -> int:
                     bat,
                     tag_w=tick.width,
                     need_w=tick.need_w,
-                    controller_hint=(
-                        f"Droid | pending={driver.snapshot()['pending_approval'] or 'none'} | y approve | space stop | q quit"
-                        if driver is not None
-                        else "say survey the wheat  |  space abort  |  q quit"
-                    ),
+                    controller_hint=hint,
                 )
                 if frame is not None
                 else np.zeros((360, 640, 3), dtype=np.uint8)
@@ -486,7 +507,7 @@ def _run_mission(args, photon, cleanup) -> int:
             if key == ord(" "):
                 driver.stop() if driver is not None else mission.request_abort()
 
-            if snap["phase"] == "done" and args.no_voice:
+            if snap["phase"] == "done" and args.no_photon:
                 break
 
             dt = time.time() - t0

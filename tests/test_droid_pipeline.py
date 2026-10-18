@@ -289,7 +289,7 @@ class WorkerTests(unittest.TestCase):
             stack.enter_context(patch.object(voice_mission, "ROOT", Path(directory)))
             stack.enter_context(patch.object(voice_mission, "load_dotenv"))
             stack.enter_context(patch.object(sys, "argv", [
-                "demo", "--fake-analysis", "--no-voice", "--no-photon", "--hz", "200",
+                "demo", "--fake-analysis", "--no-photon", "--hz", "200",
             ]))
             drone = stack.enter_context(patch.object(voice_mission, "MockDrone")).return_value
             tello = stack.enter_context(patch.object(voice_mission, "TelloDrone"))
@@ -309,6 +309,21 @@ class WorkerTests(unittest.TestCase):
                 return worker
 
             stack.enter_context(patch("ground_station.agent.worker.DroidWorker", side_effect=factory))
+            # Offline: skip live NOAA/NASA weather (network) so the camera loop can finish.
+            stack.enter_context(patch(
+                "ground_station.agent.pipeline.SurveyPipeline._join_weather",
+                side_effect=RuntimeError("offline test"),
+            ))
+
+            def _offline_justify(self, analysis, features):
+                features["insight"] = analysis.analysis_summary
+                features["justified_action"] = "continue"
+                features["weather_source"] = "offline"
+
+            stack.enter_context(patch(
+                "ground_station.agent.pipeline.SurveyPipeline._justify_locally",
+                _offline_justify,
+            ))
             stack.enter_context(patch.object(voice_mission.cv2, "imshow"))
             stack.enter_context(patch.object(voice_mission.cv2, "destroyAllWindows"))
             stack.enter_context(patch.object(voice_mission, "draw_hud", return_value=drone.get_frame.return_value))
