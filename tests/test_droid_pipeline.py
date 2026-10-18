@@ -431,6 +431,30 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(tick.action, "land")
         self.assertEqual(value.snapshot()["phase"], "abort")
 
+    def test_analysis_timeout_latches_stop_and_is_not_a_completed_survey(self):
+        from ground_station.voice_mission import latch_mission_abort, survey_finished
+
+        value = mission()
+        driver = MissionDriver(value, mock=True)
+        capture_phase(value)
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        tick = value.tick(frame, value._analysis_deadline + 1)
+        self.assertEqual(tick.action, "land")
+        self.assertEqual(value.snapshot()["phase"], "abort")
+        self.assertFalse(driver.snapshot()["stopped"])
+        self.assertTrue(latch_mission_abort(driver, value.snapshot()["phase"]))
+        self.assertTrue(driver.snapshot()["stopped"])
+        self.assertFalse(driver.approve_pending()["ok"])
+        generation = driver.snapshot()["stop_generation"]
+        self.assertFalse(latch_mission_abort(driver, "abort"))
+        self.assertEqual(driver.snapshot()["stop_generation"], generation)
+        value.tick(frame, value._analysis_deadline + 2)
+        self.assertEqual(value.snapshot()["phase"], "done")
+        self.assertFalse(survey_finished(
+            value.snapshot()["phase"], flying=False, stopped=driver.snapshot()["stopped"],
+        ))
+        self.assertTrue(survey_finished("done", flying=False, stopped=False))
+
 
 if __name__ == "__main__":
     unittest.main()

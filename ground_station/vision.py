@@ -14,12 +14,30 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 DEFAULT_ONNX = ROOT / "models" / "wheat_detection.onnx"
+POSTER_ONNX = ROOT / "models" / "wheat_poster.onnx"
 DEFAULT_PT = ROOT / "models" / "wheat_detection.pt"
 DEFAULT_WEIGHTS = DEFAULT_ONNX if DEFAULT_ONNX.is_file() else DEFAULT_PT
+WEIGHT_PRESETS = {
+    "heads": DEFAULT_ONNX,
+    "wheat": DEFAULT_ONNX,
+    "poster": POSTER_ONNX,
+    "wheat_poster": POSTER_ONNX,
+}
 MISSING_WEIGHTS_MSG = (
     f"No wheat-head model at {DEFAULT_ONNX} (or {DEFAULT_PT}). "
     "Export with: python wheat_detection/export_onnx.py"
 )
+
+
+def resolve_weights(value: str | Path | None) -> Path:
+    """Map preset name (heads|poster) or filesystem path to a weights file."""
+    if value is None:
+        return DEFAULT_WEIGHTS
+    key = str(value).strip()
+    preset = WEIGHT_PRESETS.get(key.lower())
+    if preset is not None:
+        return preset
+    return Path(value)
 
 
 @dataclass
@@ -111,10 +129,10 @@ class HsvWheatDetector:
 
 
 class YoloWheatHeadDetector:
-    """Wheat-head boxes from models/wheat_detection.onnx (or a YOLOv8 .pt)."""
+    """Wheat boxes from ONNX/PT: heads (1024) or poster (320 preferred)."""
 
     def __init__(self, weights: Path | None = None, conf: float = 0.25) -> None:
-        path = Path(weights) if weights is not None else DEFAULT_WEIGHTS
+        path = resolve_weights(weights)
         if path.suffix == ".pt" and not path.is_file():
             onnx = path.with_name("wheat_detection.onnx")
             if onnx.is_file():
@@ -122,20 +140,26 @@ class YoloWheatHeadDetector:
         if not path.is_file():
             raise FileNotFoundError(MISSING_WEIGHTS_MSG)
         self.conf = conf
+        self.path = path
+        self.label = "wheat_poster" if "poster" in path.stem.lower() else "wheat_head"
         self._onnx = None
         self._yolo = None
+        self._imgsz = 640
         if path.suffix.lower() == ".onnx":
             from wheat_detection.detect import WheatHeadDetector
 
             self._onnx = WheatHeadDetector(path, conf=conf)
-            print(f"wheat detector: ONNX {path}")
+            self._imgsz = int(getattr(self._onnx, "imgsz", 640))
+            print(f"wheat detector: ONNX {path} imgsz={self._imgsz}")
         else:
             try:
                 from ultralytics import YOLO
             except ImportError as exc:
                 raise RuntimeError("pip install ultralytics") from exc
             self._yolo = YOLO(str(path))
-            print(f"wheat detector: YOLO {path}")
+            # Poster runs prefer 320; head checkpoint historically 640/1024.
+            self._imgsz = 320 if "poster" in path.stem.lower() else 640
+            print(f"wheat detector: YOLO {path} imgsz={self._imgsz}")
 
     def detect_all(self, frame_bgr: np.ndarray) -> list[Box]:
         if self._onnx is not None:
@@ -147,11 +171,13 @@ class YoloWheatHeadDetector:
                     w=int(h.x2 - h.x1),
                     h=int(h.y2 - h.y1),
                     conf=float(h.confidence),
-                    label="wheat_head",
+                    label=self.label,
                 )
                 for h in heads
             ]
-        results = self._yolo.predict(frame_bgr, conf=self.conf, verbose=False, imgsz=640)
+        results = self._yolo.predict(
+            frame_bgr, conf=self.conf, verbose=False, imgsz=self._imgsz
+        )
         if not results:
             return []
         boxes = results[0].boxes
@@ -168,7 +194,7 @@ class YoloWheatHeadDetector:
                     w=int(x2 - x1),
                     h=int(y2 - y1),
                     conf=float(conf),
-                    label="wheat_head",
+                    label=self.label,
                 )
             )
         return out

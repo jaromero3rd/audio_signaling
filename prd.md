@@ -7,9 +7,11 @@ architecture, not a claim of live service or flight certification.
 
 | Concern | Provider |
 | --- | --- |
+| Operator activation (command chain) | Voice on phone → iMessage → Photon inbound → DroidVoiceGateway → Droid |
 | Mission decisions and crop-health image analysis | Persistent Factory Droid SDK session with native image input |
-| Operator speech to command intent | ElevenAgents, Scribe transcription + ElevenLabs TTS |
-| Drone-to-user text, images and voice notes | Photon direct iMessage space |
+| Field data stream | Drone/camera/sensors → host → optional Droid score + Chalk → store |
+| Data-chain alerts | Photon outbound: text, images, ElevenLabs voice notes |
+| Laptop voice fallback | ElevenAgents client tools |
 | Optional deterministic features | Chalk, local thresholds otherwise |
 
 Photon cannot place calls. Any “call” request means an urgent voice note, not
@@ -21,12 +23,12 @@ telephony. No separate vision or calling provider is required.
 | --- | --- |
 | FR-1 | Host receives a captured drone or mock photo through the local adapter |
 | FR-2 | `--crop-analysis` sends that photo as native Image input in the persistent Droid session, validates strict crop-health JSON and requires a same-turn decision tool |
-| FR-3 | ElevenAgents client tools start_survey, get_mission_status, abort_mission queue Droid intent, read host status or stop immediately |
-| FR-4 | Photon sends host-formatted status/analysis text; critical requested alerts add URGENT text and an ElevenLabs voice-note attachment |
+| FR-3 | Command chain: authorized Photon inbound (phone dictation or transcribed voice memo) queues Droid intent through DroidVoiceGateway; abort latches host stop. Laptop ElevenAgents client tools start_survey, get_mission_status, abort_mission are a fallback on the same gateway |
+| FR-4 | Data chain: Photon sends host-formatted status/analysis text; critical requested alerts add URGENT text and an ElevenLabs voice-note attachment |
 | FR-5 | Factory Droid performs high-level reasoning, never per-frame steering or unrestricted code execution |
 | FR-6 | Host validates only allowlisted commands for the configured drone, enforces local approval and latches emergency stop |
 | FR-7 | SQLite stores pipeline observations/decisions. Optional Chalk named query provides validated decision features; Volume helpers remain separate |
-| FR-8 | ggwave and UNO Q telemetry/mic-transfer tools remain independent optional utilities |
+| FR-8 | ggwave and UNO Q telemetry/mic-transfer stay on the data stream; they do not activate the drone |
 
 ## Image-turn protocol
 
@@ -62,9 +64,11 @@ No successful narration or JSON-only response can replace a decision tool.
 - Notifications deduplicate receipts and use stable idempotency keys/retries.
   They are best effort, not a durable outbox.
 
-Automatic photo sending and incoming Photon mission commands are not currently
-wired. The client upload boundary supports image attachments. No automatic
-mission restart, verified agronomic diagnosis or phone calling is claimed.
+Operator activation uses Photon inbound on the same direct space
+(phone → Photon → Droid). Crop-analysis JPEG sending is data-chain egress.
+The TypeScript Photon agent is the inbound command bridge (text → loopback
+ingest → Droid). It does not fly by itself. No automatic mission restart,
+verified agronomic diagnosis or phone calling is claimed.
 
 ## Acceptance and publication
 

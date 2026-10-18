@@ -18,8 +18,8 @@ import onnxruntime as ort
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL = REPO_ROOT / "models" / "wheat_detection.onnx"
+POSTER_MODEL = REPO_ROOT / "models" / "wheat_poster.onnx"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
-IMGSZ = 1024
 
 
 @dataclass(frozen=True)
@@ -55,12 +55,21 @@ class WheatHeadDetector:
             if name in available
         ]
         self.session = ort.InferenceSession(str(model_path), providers=providers)
-        self.input_name = self.session.get_inputs()[0].name
+        inp = self.session.get_inputs()[0]
+        self.input_name = inp.name
+        # Fixed export shapes are [1,3,H,W]; fall back if dynamic/unknown.
+        shape = list(inp.shape)
+        try:
+            self.imgsz = int(shape[-1]) if shape and shape[-1] not in (None, "None", -1) else 640
+        except (TypeError, ValueError):
+            self.imgsz = 640
+        if self.imgsz < 32:
+            self.imgsz = 640
         self.conf = conf
         self.iou = iou
 
     def detect(self, image_bgr: np.ndarray) -> list[WheatHead]:
-        canvas, scale, pad_x, pad_y = _letterbox(image_bgr, IMGSZ)
+        canvas, scale, pad_x, pad_y = _letterbox(image_bgr, self.imgsz)
         blob = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         blob = np.transpose(blob, (2, 0, 1))[None]
         raw = self.session.run(None, {self.input_name: blob})[0]

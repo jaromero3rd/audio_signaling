@@ -34,8 +34,8 @@ trained on labeled field days.
 | **Object detection** | Find crop rows / bare soil / irrigation equipment |
 | **Time-series on device** | Detect multi-hour drying trends, not single snapshots |
 
-Farmer **voice commands** stay on the laptop (ElevenAgents). The UNO Q’s job is
-**sense + local interpret + relay**.
+Farmer **activation** is phone voice → Photon → Droid. The UNO Q’s job is
+**sense + local interpret + relay** on the data stream. It does not start a flight.
 
 ## Drone onboard camera → Arduino UNO Q
 

@@ -16,8 +16,13 @@ loopback MCP tools.
 ## Photon iMessage command input
 
 Mission starts come from the operator's **direct iMessage** to the Photon agent
-number (not ElevenLabs). The host subscribes to the project event stream and
-classifies plain text:
+number (not ElevenLabs). The host can ingest commands two ways:
+
+1. **In-process** `PhotonInbound` Socket.IO on the project event stream.
+2. **Companion** `photon-imessage-agent` → `http://127.0.0.1:8766/operator-command`
+   (`OperatorCommandServer`) while `demo.py` is running.
+
+Plain text is classified:
 
 - start: `survey`, `start`, `fly`, `go`, `wheat`, …
 - abort: `abort`, `stop`, `land`, `emergency`, …
@@ -36,9 +41,10 @@ telephony.
 
 ## Photon direct iMessage space
 
-Configure an active Photon Beta project and iMessage assignment for one agent
-and one consenting operator. An existing **direct** space must contain exactly
-those two identities. Save:
+This space is both command ingress (phone → Photon → Droid) and data-chain
+egress (status, JPEG, voice note). Configure an active Photon Beta project
+and iMessage assignment for one agent and one consenting operator. An
+existing **direct** space must contain exactly those two identities. Save:
 
 ```dotenv
 PHOTON_API_KEY=
@@ -62,32 +68,22 @@ python -m ground_station.photon --env /absolute/private/photon.env --check
 This checks assignment and exact routing without creating a space or sending.
 Do not run `--send-test` unless the operator explicitly authorizes a real message.
 Mock flight is **not** mock messaging; use `--no-photon` to suppress all sends.
-Attachments use multipart/related uploads and stable content-hash idempotency.
-`ATTACHMENT_NOT_READY` is retried at most eight sends with a bounded delay.
-Acceptance is not delivery confirmation. The queue is bounded and not durable.
 
-## Optional Chalk and hardware
+## Chalk (optional)
 
 For `--chalk`, supply `CHALK_CLIENT_ID`, `CHALK_CLIENT_SECRET`, and the actual
-`CHALK_ENVIRONMENT` ID; deploy the existing `evaluate_field_survey` named
+environment id in `CHALK_ENVIRONMENT`. The runtime uses the deployed named
 query and select a deployment with `--chalk-branch` if needed.
-Configured Chalk failures stop the mission, not silently fall back.
-Without Chalk, thresholds remain healthy ≥ 0.7, watch ≥ 0.4, otherwise critical.
+
+## Real flight
 
 Real Tello operation requires `--allow-real-flight`, safe operator-supervised
-conditions, a fresh camera frame, battery preflight, and local `y` approval.
-Default radios put Tello on Mac Wi-Fi and internet on USB Personal Hotspot.
-The UNO Q joins that phone's Wi-Fi; `field_links` supports explicit network
+space, charged battery, and local `y` approval after Photon queues start.
+Default radios: Mac Wi-Fi → Tello; USB phone hotspot → internet. Network
 setup and `--dongle N` remains a fallback. See the README networking section.
-Space latches stop; `q` exits and requests landing as needed.
 
-## Validation
+Wheat poster detector (320 ONNX):
 
 ```bash
-python -m unittest discover -s tests -v
+python demo.py --target wheat --wheat-model poster ...
 ```
-
-All default regression tests use fake sessions/transports/devices. They need
-no service credentials and send nothing.
-`python tests/live_droid_pipeline.py` is a separate opt-in, billable Factory
-image test. Photon, ElevenLabs, camera and drone remain fake in that test.

@@ -1,35 +1,45 @@
 # AgriDrone: Photon-Directed Field Surveys
 
-A prototype with local AprilTag/YOLO steering, bounded Factory Droid decisions,
-and Photon iMessage commands plus notifications.
+A prototype with two independent chains: operator activation over iMessage, and
+a field data stream for photos, telemetry, and crop summaries.
 
 | Concern | Provider |
 | --- | --- |
+| Operator activation (command chain) | Phone iMessage → Photon inbound → DroidVoiceGateway → Droid |
 | Mission decisions and crop-health image analysis | One persistent Factory Droid SDK session, native image input |
-| Operator mission commands | Photon inbound iMessage (text → start/abort) |
-| Drone to user text, images, optional voice notes | Photon direct iMessage space |
+| Field data stream | Drone/camera/sensors → host → optional Droid score + Chalk weather → store |
+| Data-chain alerts back to the operator | Photon outbound: text, survey JPEG, optional ElevenLabs voice note |
 | Optional decision features | Chalk, or explicitly labeled local thresholds |
+
+The command chain activates the mission. The data stream never starts a flight.
+No ElevenAgents voice command path.
 
 **Photon cannot place calls.** An urgent alert is text marked URGENT plus an
 optional audio attachment, not a telephone call. No telephony integration is used.
 Crop-health scores are uncertain visual estimates, not verified diagnoses.
 
-## How Droid is used at runtime
+## Command chain (activate)
 
 ```text
-Operator → Photon inbound text → DroidVoiceGateway → persistent Droid
-                                                        ↓
-                                            host tools / local approval
-                                                        ↓
-                           camera → local steering → captured image
-                                                        ↓
-                              same Droid session: native Image attachment
-                                                        ↓
-                   strict JSON → host validation → optional Chalk / history
-                                                        ↓
-                     same turn: decision tool + matching final JSON
-                                                        ↓
-                bounded reimage / Photon alert / return home / land
+operator iMessage text (or phone dictation → text)
+    → Photon direct space (inbound)
+    → PhotonInbound / operator HTTP ingest → DroidVoiceGateway
+    → persistent Droid queues start_survey
+    → local y approval
+    → drone adapter takeoff
+```
+
+Spacebar on the laptop remains the fast stop. An iMessage abort is slower than
+local stop.
+
+## Data stream (separate)
+
+```text
+camera → local AprilTag/YOLO steering → captured image
+    → same Droid session: native Image attachment (only with --crop-analysis)
+    → strict JSON → host validation → optional Chalk / history
+    → same turn: decision tool + matching final JSON
+    → bounded reimage / Photon outbound alert / return home / land
 ```
 
 Default mode does not upload photos: Droid handles high-level requests while
@@ -70,7 +80,8 @@ It is not a fallback for a failed model. A webcam demo is not a headless test.
 
 With Photon configured, text the agent `survey` / `abort`. To enable native
 image analysis, replace `--fake-analysis` with `--crop-analysis`.
-Both use the same persistent Droid session.
+Both use the same persistent Droid session. Wheat poster YOLO (320 ONNX):
+`--target wheat --wheat-model poster`.
 
 Photon credentials enable **real iMessages even in mock mode**, labeled MOCK.
 Keep `--no-photon` for local-only runs. Critical analysis alerts requested by
@@ -88,6 +99,32 @@ ElevenLabs transports and no hardware. It is not part of fake-only validation.
 
 ## Limits and references
 
-See [AGENTS.md](AGENTS.md) for tool inventory, gates, and runtime contracts.
-See [prd.md](prd.md) for product requirements. Hardware and network notes live
-in the ground-station and UNO Q docs.
+- Native images: JPEG, PNG, GIF, WebP, nonempty, at most 5 MiB.
+- Assessments: finite score in `[0, 1]`, nonblank summary up to 3,000 characters.
+- One survey, two extra photos, 12 mission-tool calls per turn, 16 turns.
+- Approval expires after 60 seconds. Space stops; `q` exits.
+- Voice notes: in-memory MP3, Flash v2.5, at most 3,500 text characters / 5 MiB.
+  Missing or failed TTS does not prevent the independent text attempt.
+- Notifications are best effort, not a durable outbox. Accepted is not delivered.
+
+See [AGENTS.md](AGENTS.md), [runtime guide](ground_station/agent/README.md),
+[technical guide](README_TECHNICAL.md), and [requirements](prd.md).
+
+## Field networking
+
+Default radios use Mac Wi-Fi for Tello and USB Personal Hotspot for internet.
+The UNO Q joins that phone's Wi-Fi and posts to the Mac on `172.20.10.0/28`.
+For explicitly authorized network setup:
+
+1. Connect the phone by USB, trust the Mac, and enable Personal Hotspot.
+2. Run `python -m drone_interface.field_links --apply --tello-ssid TELLO-7`.
+   This joins Tello and prioritizes the USB hotspot for internet.
+3. Start `python -m ground_station.sensor_recv` for board telemetry.
+4. Copy the UNO Q example config privately, set hotspot SSID/password, and
+   leave `ground_station_url` as `"auto"`. Mic transfer is off by default.
+
+Keep the phone within board Wi-Fi range. `--dongle N` remains a fallback.
+Network setup does not authorize flight.
+
+HackHarvard 2026 prototype. Uses the Global Wheat Head Dataset 2021 (CC BY 4.0)
+and Ultralytics YOLO (AGPL-3.0). These controls are not flight-safety certification.

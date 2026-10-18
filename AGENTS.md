@@ -4,11 +4,13 @@
 
 | Concern | Provider |
 | --- | --- |
+| Operator activation (command chain) | Phone iMessage → Photon inbound → DroidVoiceGateway → Droid |
 | Mission decisions and crop-health image analysis | One persistent Factory Droid SDK session, native images |
-| Operator mission commands | Photon inbound iMessage (text → start/abort intent) |
+| Field data stream | Drone/camera/sensors → host → optional Droid score + Chalk weather → store |
 | Outbound status / analysis alerts | Photon direct iMessage space (optional ElevenLabs TTS) |
 | Optional feature evaluation | Chalk, unchanged local thresholds otherwise |
 
+The command chain activates the drone. The data stream never starts a flight.
 Photon cannot place calls. An urgent notification is URGENT text plus an
 optional voice note, not telephony. No ElevenAgents voice command path.
 
@@ -25,14 +27,14 @@ persistent session using `session.stream(..., images=[Image.from_bytes(...)])`.
 JPEG/PNG/GIF/WebP must be nonempty and ≤ 5 MiB. No tool accepts a file path.
 After the score is accepted, the host joins it with live NOAA/NASA weather in
 Chalk, stores the joined record when `CHALK_CLIENT_ID` is set, and sends the
-insight, JPEG, and an ElevenLabs clip through Photon.
+insight, JPEG, and an ElevenLabs clip through Photon outbound.
 
 Within one model turn:
 
 1. Droid reads mission status.
 2. Droid submits strict JSON to `get_survey_context(assessment=...)`.
 3. Host validates score/summary, optional Chalk features and capture liveness,
-   then returns validated context and records local history.
+ then returns validated context and records local history.
 4. Droid requests a decision and optional alert, then returns identical JSON.
 5. Host validates final JSON before committing staged effects.
 
@@ -48,12 +50,12 @@ Exactly four `agridrone` tools:
 
 - `get_mission_status()`: host driver snapshot and logical mission state.
 - `issue_drone_command(drone_id, action)`: known drone and only start_survey,
-  capture_photo, continue_survey, land, abort.
+ capture_photo, continue_survey, land, abort.
 - `get_survey_context(assessment: str | None = None)`: validated current
-  observation, local/Chalk features and last five field-scoped SQLite records.
-  Optional assessment ingress is permitted only during a host image turn.
+ observation, local/Chalk features and last five field-scoped SQLite records.
+ Optional assessment ingress is permitted only during a host image turn.
 - `send_photon_alert()`: unchanged no-argument tool; host owns recipients,
-  formatted text and delivery form. Queued/staged never means delivered.
+ formatted text and delivery form. Queued/staged never means delivered.
 
 CLI Script/ToolSearch can only dispatch/discover these tools; shell/files,
 other MCP servers and delegation are denied. Startup checks tool inventory.

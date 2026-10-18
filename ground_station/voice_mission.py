@@ -28,7 +28,24 @@ from ground_station.apriltag import FAMILIES
 from ground_station.envutil import load_dotenv
 from ground_station.mission import CLOSE_FEET_DEFAULT, FRAME_STALE_S, Gains, TAG_SIZE_M_DEFAULT, SurveyMission
 from ground_station.overlay import draw_hud_lines
-from ground_station.vision import DEFAULT_WEIGHTS, Box
+from ground_station.vision import DEFAULT_WEIGHTS, POSTER_ONNX, Box, resolve_weights
+
+
+def latch_mission_abort(driver, phase: str) -> bool:
+    """Latch the host stop when the state machine aborts on its own.
+
+    Analysis timeout and stale video request landing without going through
+    MissionDriver.stop(). Until that stop is latched, the abort falls through
+    to phase done and looks like a finished survey.
+    """
+    if driver is None or phase != "abort" or driver.snapshot()["stopped"]:
+        return False
+    driver.stop()
+    return True
+
+
+def survey_finished(phase: str, *, flying: bool, stopped: bool) -> bool:
+    return phase == "done" and not flying and not stopped
 
 
 def draw_hud(
@@ -149,7 +166,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--home-tag", type=int, default=12)
     p.add_argument("--target", choices=("auto", "wheat", "tag"), default="auto")
     p.add_argument("--target-tag", type=int, default=12)
-    p.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
+    p.add_argument(
+        "--wheat-model",
+        choices=("heads", "poster"),
+        default="heads",
+        help="wheat detector preset: heads (field YOLO) or poster (wheat_poster.onnx, 320)",
+    )
+    p.add_argument(
+        "--weights",
+        type=Path,
+        default=None,
+        help="override weights path (else --wheat-model → models/wheat_*.onnx)",
+    )
     p.add_argument(
         "--auto",
         action="store_true",
@@ -180,6 +208,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     load_dotenv()
     args = parse_args()
+    if args.weights is None:
+        args.weights = POSTER_ONNX if args.wheat_model == "poster" else DEFAULT_WEIGHTS
+    else:
+        args.weights = resolve_weights(args.weights)
     if args.controller == "droid" and not args.allow_real_flight:
         args.mock = True
     if args.controller == "droid" and args.auto:
@@ -333,6 +365,15 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
                 photon.notify("controller_failed")
             return 1
 
+        # Phone → Photon agent → HTTP ingest (optional companion to Socket.IO inbound).
+        from ground_station.agent.worker import DroidVoiceGateway
+        from ground_station.operator_http import OperatorCommandServer
+
+        ingest = OperatorCommandServer(DroidVoiceGateway(droid, driver))
+        ingest.start()
+        cleanup.callback(ingest.close)
+        print("Photon command ingest on http://127.0.0.1:8766/operator-command")
+
     if photon_client is not None and driver is not None and droid is not None:
         from ground_station.agent.worker import DroidVoiceGateway
         from ground_station.photon_inbound import InboundCommand, PhotonInbound
@@ -377,6 +418,7 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
 
             tick = mission.tick(frame, t0)
             snap = mission.snapshot()
+            latch_mission_abort(driver, snap["phase"])
 
             stopped = driver is not None and driver.snapshot()["stopped"]
             if stopped and flying:
@@ -410,7 +452,8 @@ def _run_mission(args, photon, photon_client, cleanup) -> int:
             if photon is not None:
                 if droid is not None and droid.failed.is_set():
                     photon.notify("controller_failed")
-                if snap["phase"] == "done" and not flying and (driver is None or not driver.snapshot()["stopped"]):
+                stopped_now = driver is not None and driver.snapshot()["stopped"]
+                if survey_finished(snap["phase"], flying=flying, stopped=stopped_now):
                     photon.notify("complete")
 
             if driver is not None and driver.snapshot()["stopped"]:
