@@ -302,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
 
     voice_service = None
     segmenter = None
+    photon_client = None
     if args.voice or args.voice_photon:
         from ground_station.envutil import load_dotenv
         from ground_station.voice_ingest import MicSegmenter
@@ -318,13 +319,13 @@ def main(argv: list[str] | None = None) -> int:
             if config is None:
                 print("Photon is not configured; --voice-photon needs PHOTON_* env.")
                 return 1
-            photon = PhotonClient(config)
+            photon_client = PhotonClient(config)
             try:
-                photon.check()
+                photon_client.check()
             except PhotonError as error:
                 print(f"Photon route check failed: {error}")
                 return 1
-            dispatcher = PhotonEchoDispatcher(photon)
+            dispatcher = PhotonEchoDispatcher(photon_client)
             print("Photon echo on: every transcript/intent texts the configured user.")
         voice_service = VoiceCommandService(dispatcher)
         voice_service.start()
@@ -393,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
         if voice_service is not None:
             segmenter.flush()
             voice_service.close()
+        if photon_client is not None:
+            photon_client.close()
     return 0
 
 

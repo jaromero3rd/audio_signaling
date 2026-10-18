@@ -34,10 +34,12 @@ def transcribe(wav: bytes, *, client=None) -> str:
 def map_intent(transcript: str, dispatcher) -> dict:
     """One transcript → one intent dict. Abort is checked first and bypasses Droid."""
     if ABORT.search(transcript):
-        result = dispatcher.request_abort() if hasattr(dispatcher, "request_abort") else {"ok": True}
+        result = (dispatcher.request_abort() if hasattr(dispatcher, "request_abort")
+                  else {"ok": False, "reason": "no_abort_sink"})
         return {"intent": "abort", "result": result}
     if STATUS.search(transcript):
-        result = dispatcher.snapshot() if hasattr(dispatcher, "snapshot") else {"ok": False}
+        result = (dispatcher.snapshot() if hasattr(dispatcher, "snapshot")
+                  else {"ok": False, "reason": "no_status_sink"})
         return {"intent": "status", "result": result}
     if TEXT_USER.search(transcript):
         body = TEXT_USER.search(transcript).group(1).strip() or transcript
@@ -46,7 +48,8 @@ def map_intent(transcript: str, dispatcher) -> dict:
             return {"intent": "text_user", "body": body, "result": result}
         return {"intent": "text_user", "body": body, "result": {"ok": False, "reason": "no_text_user"}}
     if START.search(transcript):
-        result = dispatcher.request_start() if hasattr(dispatcher, "request_start") else {"ok": True}
+        result = (dispatcher.request_start() if hasattr(dispatcher, "request_start")
+                  else {"ok": False, "reason": "no_start_sink"})
         return {"intent": "start_survey", "result": result}
     if hasattr(dispatcher, "submit_instruction"):
         result = dispatcher.submit_instruction(transcript)
@@ -63,10 +66,10 @@ class PrintDispatcher:
         self.intents: list[dict] = []
 
     def request_start(self) -> dict:
-        return {"ok": True, "status": "queued_for_droid", "executed": False}
+        return {"ok": True, "simulated": True, "status": "queued_for_droid", "executed": False}
 
     def request_abort(self) -> dict:
-        return {"ok": True, "stopped": True}
+        return {"ok": True, "simulated": True, "stopped": False}
 
     def snapshot(self) -> dict:
         return {"phase": "idle", "stopped": False}
@@ -83,24 +86,9 @@ class PhotonEchoDispatcher(PrintDispatcher):
         self._photon = photon_client
 
     def text_user(self, body: str) -> dict:
-        return send_text(self._photon, f"Voice command: {body}")
+        import uuid
 
-
-def send_text(client, text: str) -> dict:
-    """Arbitrary text over a verified Photon route (test/demo path)."""
-    import uuid
-
-    from ground_station.photon import PhotonError
-
-    if client._route is None:
-        raise PhotonError("Photon routing has not been verified")
-    space_id, sender_id = client._route
-    return client._request(
-        "POST", f"/v1/projects/{client.config.project}/messages",
-        headers={"idempotency-key": f"agridrone-voice:{uuid.uuid4().hex}"},
-        json={"spaceId": space_id, "senderId": sender_id,
-              "content": {"type": "text", "format": "plain", "text": text[:1000]}},
-    )
+        return self._photon.send_text(f"Voice command: {body}", f"voice:{uuid.uuid4().hex}")
 
 
 class VoiceCommandService:
@@ -123,9 +111,19 @@ class VoiceCommandService:
         try:
             self.utterances.put_nowait((device_id, wav))
         except queue.Full:
-            pass
+            # Newest may be an abort; drop the oldest utterance instead.
+            try:
+                self.utterances.get_nowait()
+                self.utterances.put_nowait((device_id, wav))
+            except (queue.Empty, queue.Full):
+                pass
+            print("Voice utterance queue full; dropped the oldest utterance.")
 
     def handle_utterance(self, device_id: str, wav: bytes) -> dict:
+        if self.client is None:
+            from elevenlabs.client import ElevenLabs
+
+            self.client = ElevenLabs(api_key=os.environ["ELEVENLABS_API_KEY"])
         transcript = transcribe(wav, client=self.client)
         if not transcript:
             return {"intent": "empty", "transcript": ""}
@@ -135,7 +133,7 @@ class VoiceCommandService:
         return outcome
 
     def _run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop.is_set() or not self.utterances.empty():
             try:
                 device_id, wav = self.utterances.get(timeout=0.1)
             except queue.Empty:

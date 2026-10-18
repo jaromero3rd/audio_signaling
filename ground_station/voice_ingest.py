@@ -75,7 +75,8 @@ class MicSegmenter:
 
     def feed(self, payload: dict) -> None:
         """Accept one /mic payload. Chunks out of contract are skipped."""
-        if payload.get("format") != "f32le" or payload.get("sample_rate") != IN_RATE:
+        if (payload.get("format") != "f32le" or payload.get("sample_rate") != IN_RATE
+                or payload.get("channels", 1) != 1):
             return
         try:
             pcm = base64.b64decode(payload.get("audio_b64") or "")
@@ -85,20 +86,26 @@ class MicSegmenter:
             return
         device_id = str(payload.get("device_id") or "unknown")
         seq = payload.get("seq")
-        ts = float(payload.get("ts") or 0.0)
+        try:
+            ts = float(payload.get("ts") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
         chunk_s = len(pcm) / 4 / IN_RATE
 
         with self._lock:
             dev = self._devices.setdefault(device_id, _Device())
-            out_of_order = (
-                not isinstance(seq, int)
-                or (dev.seq is not None and seq != dev.seq + 1)
+            # Forward seq gaps are dropped chunks (audio glitch): keep appending.
+            # Only a regress/restart or a long timestamp break breaks the utterance.
+            broken = (
+                (isinstance(seq, int) and dev.seq is not None and seq <= dev.seq)
                 or (ts and dev.ts and ts - dev.ts > self.gap_s)
             )
-            if out_of_order and dev.buf:
-                # A gap means possible lost audio; emit what we heard, restart clean.
+            if broken and dev.buf:
                 self._emit(device_id, dev)
-            dev.seq, dev.ts = seq, ts
+            if isinstance(seq, int):
+                dev.seq = seq
+            if ts:
+                dev.ts = ts
 
             dev.buf.extend(pcm)
             if float(np.abs(np.frombuffer(pcm, dtype="<f4")).max()) > self.peak_threshold:

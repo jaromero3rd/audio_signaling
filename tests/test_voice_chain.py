@@ -53,12 +53,46 @@ class SegmenterTest(unittest.TestCase):
         seg.flush()
         self.assertEqual(out, [])
 
-    def test_seq_gap_flushes_partial_utterance(self):
+    def test_forward_seq_gap_continues_utterance(self):
+        # Dropped chunks are an audio glitch, not an utterance break.
+        out = []
+        seg = MicSegmenter(lambda dev, wav: out.append(wav), silence_s=0.3)
+        seg.feed(payload(pcm_chunk("speech", 3), seq=1, ts=1.0))
+        seg.feed(payload(pcm_chunk("speech", 3), seq=9, ts=1.2))
+        self.assertEqual(out, [])
+        seg.feed(payload(pcm_chunk("silence", 20), seq=10, ts=1.6))
+        self.assertEqual(len(out), 1)
+
+    def test_seq_regress_flushes_partial_utterance(self):
+        out = []
+        seg = MicSegmenter(lambda dev, wav: out.append(wav))
+        seg.feed(payload(pcm_chunk("speech", 3), seq=5, ts=1.0))
+        seg.feed(payload(pcm_chunk("speech", 3), seq=1, ts=1.2))  # sender restart
+        self.assertEqual(len(out), 1)
+
+    def test_ts_gap_flushes_partial_utterance(self):
+        out = []
+        seg = MicSegmenter(lambda dev, wav: out.append(wav), gap_s=2.0)
+        seg.feed(payload(pcm_chunk("speech", 3), seq=1, ts=1.0))
+        seg.feed(payload(pcm_chunk("speech", 3), seq=2, ts=5.0))  # 4 s stall
+        self.assertEqual(len(out), 1)
+
+    def test_missing_seq_still_accumulates(self):
         out = []
         seg = MicSegmenter(lambda dev, wav: out.append(wav))
         seg.feed(payload(pcm_chunk("speech", 3), seq=1, ts=1.0))
-        seg.feed(payload(pcm_chunk("speech", 3), seq=9, ts=1.2))  # gap → emit first
+        seg.feed(payload(pcm_chunk("speech", 3), seq=None, ts=1.1))  # no seq: keep going
+        self.assertEqual(out, [])
+        seg.flush()
         self.assertEqual(len(out), 1)
+
+    def test_stereo_or_wrong_rate_skipped(self):
+        out = []
+        seg = MicSegmenter(lambda dev, wav: out.append(wav))
+        seg.feed(payload(pcm_chunk("speech"), seq=1) | {"channels": 2})
+        seg.feed(payload(pcm_chunk("speech"), seq=2) | {"sample_rate": 16000})
+        seg.flush()
+        self.assertEqual(out, [])
 
     def test_bad_format_and_bad_b64_skipped(self):
         out = []
@@ -128,6 +162,16 @@ class IntentMapTest(unittest.TestCase):
     def test_abort_beats_start_words(self):
         out = map_intent("stop the survey now", self.disp)
         self.assertEqual(out["intent"], "abort")
+
+    def test_simulated_abort_is_honest(self):
+        out = map_intent("abort", self.disp)
+        self.assertTrue(out["result"]["simulated"])
+        self.assertFalse(out["result"]["stopped"])
+
+    def test_missing_abort_sink_reports_failure(self):
+        out = map_intent("abort", object())
+        self.assertFalse(out["result"]["ok"])
+        self.assertEqual(out["result"]["reason"], "no_abort_sink")
 
 
 class ServiceTest(unittest.TestCase):
